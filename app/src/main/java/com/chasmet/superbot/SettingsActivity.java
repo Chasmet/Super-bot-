@@ -98,6 +98,7 @@ public class SettingsActivity extends Activity {
         super.onActivityResult(request, result, data);
         if (request == 2002) {
             installerLaunched = false;
+            if (downloadedApk != null) downloadedApk.delete();
             downloadedApk = null;
             latestVersion.setText(result == RESULT_OK ? "Mise à jour installée"
                     : "Installation annulée ou refusée par Android. Tu peux réessayer.");

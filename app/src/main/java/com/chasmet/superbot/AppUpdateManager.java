@@ -90,6 +90,7 @@ public final class AppUpdateManager {
         }
         executor.execute(() -> {
             HttpURLConnection connection = null;
+            File partial = null;
             try {
                 connection = open(release.apkUrl);
                 connection.setInstanceFollowRedirects(true);
@@ -99,7 +100,7 @@ public final class AppUpdateManager {
                 File cacheRoot = context.getCacheDir();
                 File dir = new File(cacheRoot, "updates");
                 if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("Dossier de mise à jour impossible");
-                File partial = File.createTempFile("Super-Bot-", ".part", dir);
+                partial = File.createTempFile("Super-Bot-", ".part", dir);
                 File apk = new File(partial.getAbsolutePath() + ".apk");
                 MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
                 long done = 0;
@@ -131,6 +132,7 @@ public final class AppUpdateManager {
                 listener.onError(e.getMessage() == null ? "Téléchargement impossible" : e.getMessage());
             } finally {
                 if (connection != null) connection.disconnect();
+                if (partial != null && partial.exists()) partial.delete();
             }
         });
     }
