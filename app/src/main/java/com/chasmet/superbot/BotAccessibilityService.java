@@ -65,9 +65,9 @@ public class BotAccessibilityService extends AccessibilityService {
             }
         }
 
-        // Sur certaines versions TikTok, l'option est plus bas dans la feuille « Plus d'options ».
-        if (state.equals("TIKTOK_MORE_OPTIONS")) {
+        if (state.equals("TIKTOK_MORE_OPTIONS") || state.equals("TIKTOK_MORE_OPTIONS_SCROLL")) {
             if (clickScheduleControl(root)) {
+                clearPickerAttempts(task.id);
                 return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
             }
             if (scrollForward(root)) {
@@ -75,21 +75,11 @@ public class BotAccessibilityService extends AccessibilityService {
             }
         }
 
-        // Après défilement, rechercher de nouveau le libellé ou le commutateur associé.
-        if (state.equals("TIKTOK_MORE_OPTIONS_SCROLL")) {
-            if (clickScheduleControl(root)) {
-                return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
-            }
-            if (scrollForward(root)) {
-                return mark(task, "TIKTOK_MORE_OPTIONS_SCROLL", "TIKTOK — RECHERCHE DE PROGRAMMER LA PUBLICATION");
-            }
-        }
-
-        // Cas où l'option est déjà visible sans passer par l'état attendu.
         if (!state.startsWith("TIKTOK_PICKER_")
                 && !state.equals("TIKTOK_SCHEDULE_READY")
                 && !state.equals("TIKTOK_CONFIRMING")
                 && clickScheduleControl(root)) {
+            clearPickerAttempts(task.id);
             return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
         }
 
@@ -102,28 +92,42 @@ public class BotAccessibilityService extends AccessibilityService {
             String hour = new SimpleDateFormat("HH", Locale.FRANCE).format(when);
             String minute = new SimpleDateFormat("mm", Locale.FRANCE).format(when);
 
-            if (state.equals("TIKTOK_SCHEDULE_OPEN")) {
+            if (state.equals("TIKTOK_SCHEDULE_OPEN") || state.equals("TIKTOK_PICKER_DATE_SCROLL")) {
                 if (clickExact(root, day)) {
+                    resetPickerAttempt(task.id, "date");
                     return mark(task, "TIKTOK_PICKER_DATE_SET", "TIKTOK — DATE CHOISIE");
+                }
+                if (drivePickerWheel(root, task.id, "date", day, 0)) {
+                    return mark(task, "TIKTOK_PICKER_DATE_SCROLL", "TIKTOK — RÉGLAGE DE LA DATE");
                 }
             }
 
-            if (state.equals("TIKTOK_PICKER_DATE_SET")) {
+            if (state.equals("TIKTOK_PICKER_DATE_SET") || state.equals("TIKTOK_PICKER_TIME_SCROLL")) {
                 if (clickExact(root, hourMinute)) {
+                    resetPickerAttempt(task.id, "time");
                     return mark(task, "TIKTOK_PICKER_TIME_SET", "TIKTOK — HEURE CHOISIE");
                 }
                 if (clickExact(root, hour)) {
+                    resetPickerAttempt(task.id, "hour");
                     return mark(task, "TIKTOK_PICKER_HOUR_SET", "TIKTOK — HEURE CHOISIE");
+                }
+                if (drivePickerWheel(root, task.id, "hour", hour, 1)) {
+                    return mark(task, "TIKTOK_PICKER_TIME_SCROLL", "TIKTOK — RÉGLAGE DE L'HEURE");
                 }
             }
 
-            if (state.equals("TIKTOK_PICKER_HOUR_SET")) {
+            if (state.equals("TIKTOK_PICKER_HOUR_SET") || state.equals("TIKTOK_PICKER_MINUTE_SCROLL")) {
                 if (clickExact(root, minute)) {
+                    resetPickerAttempt(task.id, "minute");
                     return mark(task, "TIKTOK_PICKER_TIME_SET", "TIKTOK — MINUTES CHOISIES");
+                }
+                if (drivePickerWheel(root, task.id, "minute", minute, 2)) {
+                    return mark(task, "TIKTOK_PICKER_MINUTE_SCROLL", "TIKTOK — RÉGLAGE DES MINUTES");
                 }
             }
 
             if (state.equals("TIKTOK_PICKER_TIME_SET") && clickFirst(root, "terminé", "done")) {
+                clearPickerAttempts(task.id);
                 return mark(task, "TIKTOK_SCHEDULE_READY", "TIKTOK — DATE ET HEURE VALIDÉES");
             }
         }
@@ -139,6 +143,96 @@ public class BotAccessibilityService extends AccessibilityService {
             return mark(task, state, "TIKTOK — NAVIGATION EN COURS");
         }
         return false;
+    }
+
+    private boolean drivePickerWheel(AccessibilityNodeInfo root, String taskId, String kind, String target, int preferredIndex) {
+        if (clickExact(root, target)) return true;
+
+        List<AccessibilityNodeInfo> wheels = new ArrayList<>();
+        collectScrollable(root, wheels);
+        if (wheels.isEmpty()) return false;
+
+        AccessibilityNodeInfo wheel = choosePickerWheel(wheels, kind, preferredIndex);
+        if (wheel == null) {
+            recycle(wheels);
+            return false;
+        }
+
+        int attempt = getPickerAttempt(taskId, kind);
+        boolean forward = attempt < 14 || (attempt >= 28 && attempt < 42);
+        int action = forward ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+        boolean moved = wheel.performAction(action);
+        if (!moved) {
+            int opposite = forward ? AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD : AccessibilityNodeInfo.ACTION_SCROLL_FORWARD;
+            moved = wheel.performAction(opposite);
+        }
+
+        recycle(wheels);
+        if (moved) {
+            setPickerAttempt(taskId, kind, attempt + 1);
+            lastActionAt = System.currentTimeMillis();
+        }
+        return moved;
+    }
+
+    private static AccessibilityNodeInfo choosePickerWheel(List<AccessibilityNodeInfo> wheels, String kind, int preferredIndex) {
+        if (wheels == null || wheels.isEmpty()) return null;
+
+        for (AccessibilityNodeInfo wheel : wheels) {
+            String d = descriptor(wheel);
+            if ("date".equals(kind) && (d.contains("date") || d.contains("day") || d.contains("jour"))) return wheel;
+            if ("hour".equals(kind) && (d.contains("hour") || d.contains("heure"))) return wheel;
+            if ("minute".equals(kind) && (d.contains("minute") || d.contains("min"))) return wheel;
+        }
+
+        int size = wheels.size();
+        int index;
+        if ("date".equals(kind)) {
+            index = 0;
+        } else if ("hour".equals(kind)) {
+            index = size >= 3 ? size - 2 : Math.min(1, size - 1);
+        } else if ("minute".equals(kind)) {
+            index = size - 1;
+        } else {
+            index = Math.min(preferredIndex, size - 1);
+        }
+        return wheels.get(Math.max(0, index));
+    }
+
+    private static void collectScrollable(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
+        if (node == null) return;
+        if (node.isScrollable()) out.add(AccessibilityNodeInfo.obtain(node));
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                collectScrollable(child, out);
+                child.recycle();
+            }
+        }
+    }
+
+    private int getPickerAttempt(String taskId, String kind) {
+        return getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .getInt("picker_" + kind + "_" + taskId, 0);
+    }
+
+    private void setPickerAttempt(String taskId, String kind, int value) {
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .edit().putInt("picker_" + kind + "_" + taskId, value).apply();
+    }
+
+    private void resetPickerAttempt(String taskId, String kind) {
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .edit().remove("picker_" + kind + "_" + taskId).apply();
+    }
+
+    private void clearPickerAttempts(String taskId) {
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
+                .remove("picker_date_" + taskId)
+                .remove("picker_hour_" + taskId)
+                .remove("picker_minute_" + taskId)
+                .remove("picker_time_" + taskId)
+                .apply();
     }
 
     private boolean clickScheduleControl(AccessibilityNodeInfo root) {
@@ -242,7 +336,7 @@ public class BotAccessibilityService extends AccessibilityService {
             else if (editable.size() == 1) value = combined;
             if (!TextUtils.isEmpty(value) && setText(node, value)) changed = true;
         }
-        for (AccessibilityNodeInfo node : editable) node.recycle();
+        recycle(editable);
         return changed;
     }
 
@@ -263,6 +357,7 @@ public class BotAccessibilityService extends AccessibilityService {
         if (node.getViewIdResourceName() != null) b.append(node.getViewIdResourceName()).append(' ');
         if (node.getContentDescription() != null) b.append(node.getContentDescription()).append(' ');
         if (Build.VERSION.SDK_INT >= 26 && node.getHintText() != null) b.append(node.getHintText()).append(' ');
+        if (node.getText() != null) b.append(node.getText()).append(' ');
         return b.toString().toLowerCase(Locale.ROOT);
     }
 
@@ -350,6 +445,7 @@ public class BotAccessibilityService extends AccessibilityService {
     }
 
     private void finish(PublicationTask task, String status) {
+        clearPickerAttempts(task.id);
         task.status = status;
         PublicationTaskRepository.save(this, task);
         getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
