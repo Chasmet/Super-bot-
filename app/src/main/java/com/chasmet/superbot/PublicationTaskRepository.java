@@ -62,7 +62,9 @@ public final class PublicationTaskRepository {
 
     public static synchronized void delete(Context context, String id) {
         List<PublicationTask> tasks = load(context);
-        tasks.removeIf(t -> id.equals(t.id));
+        for (int i = tasks.size() - 1; i >= 0; i--) {
+            if (id.equals(tasks.get(i).id)) tasks.remove(i);
+        }
         write(context, tasks);
     }
 
