@@ -5,6 +5,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -13,10 +16,29 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Restore stable debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: superbot-debug-keystore-v1
+
+      - name: Create signing key only once
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Super Bot Debug,O=Chasmet,C=FR" \
+              -keyalg RSA -keysize 2048 -validity 10000
+          fi
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -26,8 +48,30 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug
 
-      - name: Upload APK
+      - name: Prepare APK name
+        id: version
+        run: |
+          VERSION=$(grep "versionName" app/build.gradle | head -1 | sed -E "s/.*versionName[ =]+['\"]([^'\"]+)['\"].*/\1/")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          cp app/build/outputs/apk/debug/app-debug.apk "Super-Bot-v$VERSION.apk"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Super-Bot-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Super-Bot-APK-v${{ steps.version.outputs.version }}
+          path: Super-Bot-v${{ steps.version.outputs.version }}.apk
+
+      - name: Publish or refresh GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          TAG="v$VERSION"
+          APK="Super-Bot-v$VERSION.apk"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --title "Super Bot v$VERSION" \
+              --notes "Mise à jour Super Bot v$VERSION. Téléchargeable directement depuis Réglages > Mises à jour dans l'application."
+          fi
