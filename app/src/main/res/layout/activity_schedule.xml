@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0B1020">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="18dp">
+
+        <TextView
+            android:id="@+id/buttonBack"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:gravity="center_vertical"
+            android:text="‹  Retour"
+            android:textColor="#63E6FF"
+            android:textSize="16sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="PROGRAMMATION"
+            android:textColor="#FFFFFF"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/textScheduledVideo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="#9FB0D0"
+            android:textSize="14sp" />
+
+        <Spinner
+            android:id="@+id/spinnerPlatform"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="12dp"
+            android:background="#182442" />
+
+        <EditText
+            android:id="@+id/editTitle"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:hint="Titre"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#6D7C9D" />
+
+        <EditText
+            android:id="@+id/editDescription"
+            android:layout_width="match_parent"
+            android:layout_height="110dp"
+            android:gravity="top"
+            android:hint="Description / légende"
+            android:inputType="textMultiLine"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#6D7C9D" />
+
+        <EditText
+            android:id="@+id/editHashtags"
+            android:layout_width="match_parent"
+            android:layout_height="70dp"
+            android:gravity="top"
+            android:hint="#hashtags"
+            android:inputType="textMultiLine"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#6D7C9D" />
+
+        <Spinner
+            android:id="@+id/spinnerVisibility"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:background="#182442" />
+
+        <DatePicker
+            android:id="@+id/datePicker"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:calendarViewShown="true" />
+
+        <TimePicker
+            android:id="@+id/timePicker"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <Button
+            android:id="@+id/buttonSaveSchedule"
+            android:layout_width="match_parent"
+            android:layout_height="58dp"
+            android:text="Enregistrer la programmation" />
+
+        <Button
+            android:id="@+id/buttonOpenQueue"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:layout_marginTop="8dp"
+            android:text="Voir la file d'attente" />
+    </LinearLayout>
+</ScrollView>
