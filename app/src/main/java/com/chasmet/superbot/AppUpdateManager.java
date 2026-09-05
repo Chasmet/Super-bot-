@@ -10,7 +10,8 @@ import java.util.HashSet;
 import java.io.IOException;
 import android.net.Uri;
 import android.os.Build;
-import android.provider.Settings;
+import java.security.MessageDigest;
+import java.util.Locale;
 
 import androidx.core.content.FileProvider;
 
@@ -56,6 +57,8 @@ public final class AppUpdateManager {
                 String body = release.optString("body", "");
                 JSONArray assets = release.optJSONArray("assets");
                 String apkUrl = "";
+                String digest = "";
+                long expectedSize = 0;
                 if (assets != null) {
                     for (int i = 0; i < assets.length(); i++) {
                         JSONObject asset = assets.optJSONObject(i);
@@ -63,13 +66,15 @@ public final class AppUpdateManager {
                         String name = asset.optString("name", "").toLowerCase();
                         if (name.endsWith(".apk")) {
                             apkUrl = asset.optString("browser_download_url", "");
+                            digest = asset.optString("digest", "");
+                            expectedSize = asset.optLong("size", 0);
                             break;
                         }
                     }
                 }
                 String current = installedVersion(context);
                 boolean newer = compare(tag, current) > 0;
-                listener.onCheckResult(new ReleaseInfo(tag, current, apkUrl, body, newer));
+                listener.onCheckResult(new ReleaseInfo(tag, current, apkUrl, body, newer, digest, expectedSize));
             } catch (Exception e) {
                 listener.onError(e.getMessage() == null ? "Erreur de mise à jour" : e.getMessage());
             } finally {
@@ -94,8 +99,9 @@ public final class AppUpdateManager {
                 File cacheRoot = context.getCacheDir();
                 File dir = new File(cacheRoot, "updates");
                 if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("Dossier de mise à jour impossible");
-                File apk = new File(dir, "Super-Bot-update.apk");
-                File partial = new File(dir, "Super-Bot-update.part");
+                File partial = File.createTempFile("Super-Bot-", ".part", dir);
+                File apk = new File(partial.getAbsolutePath() + ".apk");
+                MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
                 long done = 0;
                 try (InputStream in = new BufferedInputStream(connection.getInputStream());
                      FileOutputStream out = new FileOutputStream(partial)) {
@@ -104,12 +110,19 @@ public final class AppUpdateManager {
                     while ((read = in.read(buffer)) != -1) {
                         if (Thread.currentThread().isInterrupted()) throw new IOException("Téléchargement annulé");
                         out.write(buffer, 0, read);
+                        sha256.update(buffer, 0, read);
                         done += read;
                         int percent = length > 0 ? (int)Math.min(100, (done * 100L) / length) : 0;
                         listener.onDownloadProgress(percent);
                     }
                 }
                 if (done == 0 || (length > 0 && done != length)) throw new IOException("Téléchargement incomplet, réessaie");
+                if (release.expectedSize > 0 && done != release.expectedSize) throw new IOException("Taille APK incorrecte");
+                if (release.digest.startsWith("sha256:")) {
+                    StringBuilder hex = new StringBuilder();
+                    for (byte value : sha256.digest()) hex.append(String.format(Locale.ROOT, "%02x", value & 255));
+                    if (!release.digest.substring(7).equalsIgnoreCase(hex.toString())) throw new IOException("APK endommagé : empreinte SHA-256 incorrecte");
+                }
                 validateApk(partial);
                 if (apk.exists() && !apk.delete()) throw new IOException("Ancien téléchargement impossible à remplacer");
                 if (!partial.renameTo(apk)) throw new IOException("Finalisation du téléchargement impossible");
@@ -204,13 +217,17 @@ public final class AppUpdateManager {
         public final String apkUrl;
         public final String notes;
         public final boolean newer;
+        public final String digest;
+        public final long expectedSize;
 
-        ReleaseInfo(String latestVersion, String currentVersion, String apkUrl, String notes, boolean newer) {
+        ReleaseInfo(String latestVersion, String currentVersion, String apkUrl, String notes, boolean newer, String digest, long expectedSize) {
             this.latestVersion = latestVersion;
             this.currentVersion = currentVersion;
             this.apkUrl = apkUrl;
             this.notes = notes;
             this.newer = newer;
+            this.digest = digest;
+            this.expectedSize = expectedSize;
         }
     }
 
