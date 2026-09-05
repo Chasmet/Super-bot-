@@ -15,12 +15,14 @@ public class BootReceiver extends BroadcastReceiver {
         List<PublicationTask> tasks = PublicationTaskRepository.load(context);
         for (PublicationTask task : tasks) {
             if (task.scheduledAt <= now) continue;
+            if ("TikTok".equals(task.platform)) continue;
             if (!"PROGRAMMÉ".equals(task.status)) continue;
             schedule(context, task);
         }
     }
 
     public static void schedule(Context context, PublicationTask task) {
+        if (task == null || "TikTok".equals(task.platform)) return;
         AlarmManager alarm = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         if (alarm == null) return;
         Intent i = new Intent(context, PublicationAlarmReceiver.class);
