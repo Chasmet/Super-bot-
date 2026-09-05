@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Super Bot</string>
-    <string name="accessibility_description">Permet à Super Bot d&apos;exécuter uniquement les publications programmées sur TikTok, Instagram et YouTube.</string>
+    <string name="accessibility_description">Service Super Bot pour les publications programmees sur TikTok, Instagram et YouTube.</string>
 </resources>
