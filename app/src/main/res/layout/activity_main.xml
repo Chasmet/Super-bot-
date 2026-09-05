@@ -11,21 +11,43 @@
         android:orientation="vertical"
         android:padding="20dp">
 
-        <TextView
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="SUPER BOT"
-            android:textColor="#FFFFFF"
-            android:textSize="28sp"
-            android:textStyle="bold" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="Studio vidéo + programmation automatique"
-            android:textColor="#91A4CC"
-            android:textSize="14sp" />
+            <ImageView
+                android:layout_width="76dp"
+                android:layout_height="76dp"
+                android:contentDescription="Logo Super Bot"
+                android:src="@drawable/logo_super_bot" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="14dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="SUPER BOT"
+                    android:textColor="#FFFFFF"
+                    android:textSize="28sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:text="CRÉE • PLANIFIE • PUBLIE • AUTOMATISE"
+                    android:textColor="#63E6FF"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+        </LinearLayout>
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -114,7 +136,8 @@
             android:layout_marginTop="10dp"
             android:background="#25315C"
             android:gravity="center_vertical"
-            android:paddingHorizontal="18dp"
+            android:paddingLeft="18dp"
+            android:paddingRight="18dp"
             android:text="◷   Programmer une publication"
             android:textColor="#FFFFFF"
             android:textSize="16sp"
@@ -197,7 +220,8 @@
             android:layout_marginBottom="24dp"
             android:background="#141D33"
             android:gravity="center_vertical"
-            android:paddingHorizontal="18dp"
+            android:paddingLeft="18dp"
+            android:paddingRight="18dp"
             android:text="⚙   Réglages • MCP • mises à jour"
             android:textColor="#FFFFFF"
             android:textSize="16sp"
