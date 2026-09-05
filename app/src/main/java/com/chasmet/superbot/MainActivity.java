@@ -1,6 +1,7 @@
 package com.chasmet.superbot;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.Toast;
@@ -19,13 +20,17 @@ public class MainActivity extends Activity {
         bindAction(R.id.cardInstagram, "Bot Instagram");
         bindAction(R.id.cardShorts, "Bot YouTube Shorts");
         bindAction(R.id.cardYouTube, "Bot YouTube classique");
-        bindAction(R.id.cardSettings, "Réglages");
+
+        View settings = findViewById(R.id.cardSettings);
+        if (settings != null) {
+            settings.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        }
     }
 
     private void bindAction(int id, String label) {
         View view = findViewById(id);
         if (view != null) {
-            view.setOnClickListener(v -> Toast.makeText(this, label + " — module prêt à connecter", Toast.LENGTH_SHORT).show());
+            view.setOnClickListener(v -> Toast.makeText(this, label + " — module en préparation", Toast.LENGTH_SHORT).show());
         }
     }
 }
