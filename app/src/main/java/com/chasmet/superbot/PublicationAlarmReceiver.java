@@ -17,17 +17,24 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
         if (id == null) return;
         PublicationTask task = PublicationTaskRepository.find(context, id);
         if (task == null) return;
+        dispatchNow(context, task);
+    }
+
+    public static boolean dispatchNow(Context context, PublicationTask task) {
         File video = new File(task.videoPath == null ? "" : task.videoPath);
         if (!video.exists()) {
             task.status = "ERREUR • vidéo introuvable";
             PublicationTaskRepository.save(context, task);
-            return;
+            return false;
         }
 
-        task.status = "EN COURS";
+        task.status = "TRANSMIS AU BOT • " + task.platform;
         PublicationTaskRepository.save(context, task);
         context.getSharedPreferences("superbot_bot_state", Context.MODE_PRIVATE)
-                .edit().putString("active_task_id", task.id).apply();
+                .edit()
+                .putString("active_task_id", task.id)
+                .remove("state_" + task.id)
+                .apply();
 
         String metadata = buildMetadata(task);
         ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
@@ -43,9 +50,13 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
             String pkg = packageFor(task.platform);
             if (pkg != null) share.setPackage(pkg);
             context.startActivity(share);
+            return true;
         } catch (Exception error) {
             task.status = "ERREUR • application indisponible";
             PublicationTaskRepository.save(context, task);
+            context.getSharedPreferences("superbot_bot_state", Context.MODE_PRIVATE)
+                    .edit().remove("active_task_id").apply();
+            return false;
         }
     }
 
