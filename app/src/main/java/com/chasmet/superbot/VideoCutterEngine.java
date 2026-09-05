@@ -1,6 +1,7 @@
 package com.chasmet.superbot;
 
 import android.content.Context;
+import android.media.MediaCodec;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
 import android.media.MediaMetadataRetriever;
@@ -66,6 +67,7 @@ public final class VideoCutterEngine {
     private static void cut(Context context, Uri source, File output, long startMs, long endMs) throws Exception {
         MediaExtractor extractor = new MediaExtractor();
         MediaMuxer muxer = null;
+        boolean muxerStarted = false;
         try {
             extractor.setDataSource(context, source, null);
             int trackCount = extractor.getTrackCount();
@@ -81,11 +83,12 @@ public final class VideoCutterEngine {
                 }
             }
             muxer.start();
+            muxerStarted = true;
             long startUs = startMs * 1000L;
             long endUs = endMs * 1000L;
             extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
-            ByteBuffer buffer = ByteBuffer.allocate(2 * 1024 * 1024);
-            MediaMuxer.BufferInfo info = new MediaMuxer.BufferInfo();
+            ByteBuffer buffer = ByteBuffer.allocateDirect(2 * 1024 * 1024);
+            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             long firstPts = -1L;
             while (true) {
                 int track = extractor.getSampleTrackIndex();
@@ -115,7 +118,9 @@ public final class VideoCutterEngine {
         } finally {
             try { extractor.release(); } catch (Exception ignored) {}
             if (muxer != null) {
-                try { muxer.stop(); } catch (Exception ignored) {}
+                if (muxerStarted) {
+                    try { muxer.stop(); } catch (Exception ignored) {}
+                }
                 try { muxer.release(); } catch (Exception ignored) {}
             }
         }
