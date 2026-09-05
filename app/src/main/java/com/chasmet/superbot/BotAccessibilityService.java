@@ -25,7 +25,8 @@ public class BotAccessibilityService extends AccessibilityService {
         String expected = PublicationAlarmReceiver.packageFor(task.platform);
         String current = event.getPackageName().toString();
         if (expected == null || !expected.equals(current)) return;
-        if (System.currentTimeMillis() - lastActionAt < 900L) return;
+        if (System.currentTimeMillis() - lastActionAt < 850L) return;
+
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
         try {
@@ -53,12 +54,10 @@ public class BotAccessibilityService extends AccessibilityService {
         boolean future = task.scheduledAt > System.currentTimeMillis() + 60000L;
         if (!future) return false;
 
-        // 1) Remplir la légende/métadonnées une seule fois.
         if (!state.startsWith("TIKTOK_") && fillMetadata(root, task)) {
             return mark(task, "TIKTOK_METADATA", "TIKTOK — MÉTADONNÉES REMPLIES");
         }
 
-        // 2) Ouvrir les options avancées.
         if ((state.isEmpty() || state.equals("TIKTOK_METADATA"))
                 && containsAny(root, "plus d’options", "plus d'options", "more options")) {
             if (clickFirst(root, "plus d’options", "plus d'options", "more options")) {
@@ -66,25 +65,34 @@ public class BotAccessibilityService extends AccessibilityService {
             }
         }
 
-        // 3) Ouvrir la programmation TikTok immédiatement.
-        if ((state.equals("TIKTOK_MORE_OPTIONS") || state.equals("TIKTOK_METADATA"))
-                && containsAny(root, "programmer la publication", "schedule post")) {
-            if (clickFirst(root, "programmer la publication", "schedule post")) {
+        // Sur certaines versions TikTok, l'option est plus bas dans la feuille « Plus d'options ».
+        if (state.equals("TIKTOK_MORE_OPTIONS")) {
+            if (clickScheduleControl(root)) {
                 return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
+            }
+            if (scrollForward(root)) {
+                return mark(task, "TIKTOK_MORE_OPTIONS_SCROLL", "TIKTOK — RECHERCHE DE PROGRAMMER LA PUBLICATION");
             }
         }
 
-        // Certains écrans affichent directement l'option de programmation.
-        if (containsAny(root, "programmer la publication", "schedule post")
-                && !state.startsWith("TIKTOK_PICKER_")
+        // Après défilement, rechercher de nouveau le libellé ou le commutateur associé.
+        if (state.equals("TIKTOK_MORE_OPTIONS_SCROLL")) {
+            if (clickScheduleControl(root)) {
+                return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
+            }
+            if (scrollForward(root)) {
+                return mark(task, "TIKTOK_MORE_OPTIONS_SCROLL", "TIKTOK — RECHERCHE DE PROGRAMMER LA PUBLICATION");
+            }
+        }
+
+        // Cas où l'option est déjà visible sans passer par l'état attendu.
+        if (!state.startsWith("TIKTOK_PICKER_")
                 && !state.equals("TIKTOK_SCHEDULE_READY")
-                && !state.equals("TIKTOK_CONFIRMING")) {
-            if (clickFirst(root, "programmer la publication", "schedule post")) {
-                return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
-            }
+                && !state.equals("TIKTOK_CONFIRMING")
+                && clickScheduleControl(root)) {
+            return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
         }
 
-        // 4) Sélectionner réellement la date puis l'heure dans la feuille TikTok.
         if (state.equals("TIKTOK_SCHEDULE_OPEN") || state.startsWith("TIKTOK_PICKER_")
                 || containsAny(root, "date et heure de publication", "date and time", "date", "heure", "time")) {
 
@@ -101,8 +109,6 @@ public class BotAccessibilityService extends AccessibilityService {
             }
 
             if (state.equals("TIKTOK_PICKER_DATE_SET")) {
-                // Selon la version TikTok, l'heure peut être exposée comme "18:00"
-                // ou comme deux roues séparées "18" et "00".
                 if (clickExact(root, hourMinute)) {
                     return mark(task, "TIKTOK_PICKER_TIME_SET", "TIKTOK — HEURE CHOISIE");
                 }
@@ -117,23 +123,85 @@ public class BotAccessibilityService extends AccessibilityService {
                 }
             }
 
-            // Ne jamais valider « Terminé » avant que date ET heure aient été sélectionnées.
             if (state.equals("TIKTOK_PICKER_TIME_SET") && clickFirst(root, "terminé", "done")) {
                 return mark(task, "TIKTOK_SCHEDULE_READY", "TIKTOK — DATE ET HEURE VALIDÉES");
             }
         }
 
-        // 5) Une fois revenu sur l'écran de publication, confirmer la programmation.
         if (state.equals("TIKTOK_SCHEDULE_READY") && clickFirst(root, "publier", "post")) {
             return mark(task, "TIKTOK_CONFIRMING", "TIKTOK — VALIDATION DE LA PROGRAMMATION");
         }
 
-        // Navigation intermédiaire uniquement avant l'écran de programmation.
         if (!state.startsWith("TIKTOK_PICKER_")
                 && !state.equals("TIKTOK_SCHEDULE_READY")
                 && !state.equals("TIKTOK_CONFIRMING")
                 && clickFirst(root, "suivant", "next", "continuer", "continue")) {
             return mark(task, state, "TIKTOK — NAVIGATION EN COURS");
+        }
+        return false;
+    }
+
+    private boolean clickScheduleControl(AccessibilityNodeInfo root) {
+        String[] labels = {"programmer la publication", "programmer", "schedule post", "schedule"};
+        for (String label : labels) {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
+            if (nodes == null) continue;
+            for (AccessibilityNodeInfo node : nodes) {
+                if (clickNode(node) || clickNearbyCheckable(node)) {
+                    recycle(nodes);
+                    return true;
+                }
+            }
+            recycle(nodes);
+        }
+        return false;
+    }
+
+    private static boolean clickNearbyCheckable(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
+        try {
+            for (int level = 0; level < 4 && current != null; level++) {
+                if (clickCheckableDescendant(current)) return true;
+                AccessibilityNodeInfo parent = current.getParent();
+                current.recycle();
+                current = parent;
+            }
+            return false;
+        } finally {
+            if (current != null) current.recycle();
+        }
+    }
+
+    private static boolean clickCheckableDescendant(AccessibilityNodeInfo node) {
+        if (node == null) return false;
+        if (node.isEnabled() && (node.isCheckable() || node.isClickable())) {
+            CharSequence cls = node.getClassName();
+            String className = cls == null ? "" : cls.toString().toLowerCase(Locale.ROOT);
+            if (node.isCheckable() || className.contains("switch") || className.contains("checkbox")) {
+                return node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                boolean clicked = clickCheckableDescendant(child);
+                child.recycle();
+                if (clicked) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean scrollForward(AccessibilityNodeInfo root) {
+        if (root == null) return false;
+        if (root.isScrollable() && root.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) return true;
+        for (int i = 0; i < root.getChildCount(); i++) {
+            AccessibilityNodeInfo child = root.getChild(i);
+            if (child != null) {
+                boolean scrolled = scrollForward(child);
+                child.recycle();
+                if (scrolled) return true;
+            }
         }
         return false;
     }
@@ -205,48 +273,66 @@ public class BotAccessibilityService extends AccessibilityService {
     }
 
     private static boolean clickExact(AccessibilityNodeInfo root, String label) {
-        List<AccessibilityNodeInfo> n = root.findAccessibilityNodeInfosByText(label);
-        if (n == null) return false;
-        for (AccessibilityNodeInfo x : n) {
+        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
+        if (nodes == null) return false;
+        for (AccessibilityNodeInfo x : nodes) {
             CharSequence t = x.getText();
             if (t != null && label.equalsIgnoreCase(t.toString().trim()) && clickNode(x)) {
-                for (AccessibilityNodeInfo z : n) z.recycle();
+                recycle(nodes);
                 return true;
             }
         }
-        for (AccessibilityNodeInfo z : n) z.recycle();
+        recycle(nodes);
         return false;
     }
 
     private static boolean clickFirst(AccessibilityNodeInfo root, String... labels) {
-        for (String l : labels) {
-            List<AccessibilityNodeInfo> n = root.findAccessibilityNodeInfosByText(l);
-            if (n == null) continue;
-            for (AccessibilityNodeInfo x : n) {
+        for (String label : labels) {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
+            if (nodes == null) continue;
+            for (AccessibilityNodeInfo x : nodes) {
                 if (clickNode(x)) {
-                    for (AccessibilityNodeInfo z : n) z.recycle();
+                    recycle(nodes);
                     return true;
                 }
             }
-            for (AccessibilityNodeInfo z : n) z.recycle();
+            recycle(nodes);
         }
         return false;
     }
 
     private static boolean clickNode(AccessibilityNodeInfo n) {
-        AccessibilityNodeInfo t = n;
-        while (t != null && !t.isClickable()) t = t.getParent();
-        return t != null && t.isEnabled() && t.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(n);
+        try {
+            while (current != null) {
+                if (current.isClickable() && current.isEnabled()) {
+                    return current.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                }
+                AccessibilityNodeInfo parent = current.getParent();
+                current.recycle();
+                current = parent;
+            }
+            return false;
+        } finally {
+            if (current != null) current.recycle();
+        }
     }
 
     private static boolean containsAny(AccessibilityNodeInfo root, String... labels) {
-        for (String l : labels) {
-            List<AccessibilityNodeInfo> n = root.findAccessibilityNodeInfosByText(l);
-            boolean f = n != null && !n.isEmpty();
-            if (n != null) for (AccessibilityNodeInfo x : n) x.recycle();
-            if (f) return true;
+        for (String label : labels) {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
+            boolean found = nodes != null && !nodes.isEmpty();
+            if (nodes != null) recycle(nodes);
+            if (found) return true;
         }
         return false;
+    }
+
+    private static void recycle(List<AccessibilityNodeInfo> nodes) {
+        if (nodes == null) return;
+        for (AccessibilityNodeInfo node : nodes) {
+            if (node != null) node.recycle();
+        }
     }
 
     private boolean mark(PublicationTask task, String state, String status) {
