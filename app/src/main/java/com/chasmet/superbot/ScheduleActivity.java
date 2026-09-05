@@ -89,10 +89,22 @@ public class ScheduleActivity extends Activity {
         task.hashtags = hashtags.getText().toString().trim();
         task.visibility = String.valueOf(visibility.getSelectedItem());
         task.scheduledAt = c.getTimeInMillis();
-        task.status = "PROGRAMMÉ";
-        PublicationTaskRepository.save(this, task);
-        BootReceiver.schedule(this, task);
-        Toast.makeText(this, "Publication programmée", Toast.LENGTH_LONG).show();
+
+        if ("TikTok".equals(task.platform)) {
+            task.status = "À TRANSMETTRE AU BOT TIKTOK";
+            PublicationTaskRepository.save(this, task);
+            boolean sent = PublicationAlarmReceiver.dispatchNow(this, task);
+            if (sent) {
+                Toast.makeText(this, "Mission transmise au Bot TikTok : il va programmer la vidéo maintenant pour la date choisie.", Toast.LENGTH_LONG).show();
+            } else {
+                Toast.makeText(this, "Impossible de transmettre la mission au Bot TikTok", Toast.LENGTH_LONG).show();
+            }
+        } else {
+            task.status = "PROGRAMMÉ";
+            PublicationTaskRepository.save(this, task);
+            BootReceiver.schedule(this, task);
+            Toast.makeText(this, "Publication programmée. Le bot spécialisé de ce réseau sera calibré dans une prochaine mise à jour.", Toast.LENGTH_LONG).show();
+        }
         finish();
     }
 }
