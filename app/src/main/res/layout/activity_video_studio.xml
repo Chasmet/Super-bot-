@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0B1020">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="18dp">
+
+        <TextView
+            android:id="@+id/buttonBack"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:gravity="center_vertical"
+            android:text="‹  Retour"
+            android:textColor="#63E6FF"
+            android:textSize="16sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="STUDIO VIDÉO"
+            android:textColor="#FFFFFF"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/buttonPickVideo"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="14dp"
+            android:text="Choisir une vidéo" />
+
+        <VideoView
+            android:id="@+id/videoPreview"
+            android:layout_width="match_parent"
+            android:layout_height="220dp"
+            android:layout_marginTop="12dp"
+            android:background="#000000" />
+
+        <TextView
+            android:id="@+id/textVideoInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Aucune vidéo chargée"
+            android:textColor="#9FB0D0"
+            android:textSize="14sp" />
+
+        <ProgressBar
+            android:id="@+id/exportProgress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="12dp"
+            android:layout_marginTop="10dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="DÉCOUPE AUTOMATIQUE"
+            android:textColor="#7F90B5"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal">
+            <Button android:id="@+id/button15" android:layout_width="0dp" android:layout_height="52dp" android:layout_weight="1" android:text="15 s" />
+            <Button android:id="@+id/button30" android:layout_width="0dp" android:layout_height="52dp" android:layout_weight="1" android:text="30 s" />
+            <Button android:id="@+id/button60" android:layout_width="0dp" android:layout_height="52dp" android:layout_weight="1" android:text="60 s" />
+            <Button android:id="@+id/button90" android:layout_width="0dp" android:layout_height="52dp" android:layout_weight="1" android:text="90 s" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <EditText
+                android:id="@+id/editCustomSeconds"
+                android:layout_width="0dp"
+                android:layout_height="54dp"
+                android:layout_weight="1"
+                android:hint="1 à 600 s"
+                android:inputType="number"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#6D7C9D" />
+            <Button
+                android:id="@+id/buttonCustom"
+                android:layout_width="wrap_content"
+                android:layout_height="54dp"
+                android:text="Découper" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="ROGNAGE MANUEL (secondes)"
+            android:textColor="#7F90B5"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <EditText
+                android:id="@+id/editTrimStart"
+                android:layout_width="0dp"
+                android:layout_height="54dp"
+                android:layout_weight="1"
+                android:hint="Début"
+                android:inputType="numberDecimal"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#6D7C9D" />
+            <EditText
+                android:id="@+id/editTrimEnd"
+                android:layout_width="0dp"
+                android:layout_height="54dp"
+                android:layout_weight="1"
+                android:hint="Fin"
+                android:inputType="numberDecimal"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#6D7C9D" />
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/buttonTrim"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:text="Rogner la vidéo" />
+
+        <Button
+            android:id="@+id/buttonLibrary"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:layout_marginTop="14dp"
+            android:text="Ouvrir la bibliothèque" />
+
+    </LinearLayout>
+</ScrollView>
