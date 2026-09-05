@@ -53,6 +53,25 @@ jobs:
       - name: Build and audit debug APK
         run: gradle assembleDebug lintDebug
 
+      - name: Prepare APK name
+        id: version
+        run: |
+          VERSION=$(grep "versionName" app/build.gradle | head -1 | sed -E "s/.*versionName[ =]+['\"]([^'\"]+)['\"].*/\1/")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          cp app/build/outputs/apk/debug/app-debug.apk "Super-Bot-v$VERSION.apk"
+
+      - name: Write installation warning
+        run: |
+          echo "APK DE TEST : ne pas désinstaller la version existante. La compatibilité avec 1.2.1 est vérifiée séparément ; cet artifact ne constitue pas une mise à jour validée." > INSTALLATION.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Super-Bot-TEST-v${{ steps.version.outputs.version }}
+          path: |
+            Super-Bot-v${{ steps.version.outputs.version }}.apk
+            INSTALLATION.txt
+
       - name: Verify compatibility with installed 1.2.1
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
@@ -77,19 +96,6 @@ jobs:
             *-cert.txt
             *-sha.txt
             app/build/reports/lint-results-debug.*
-
-      - name: Prepare APK name
-        id: version
-        run: |
-          VERSION=$(grep "versionName" app/build.gradle | head -1 | sed -E "s/.*versionName[ =]+['\"]([^'\"]+)['\"].*/\1/")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          cp app/build/outputs/apk/debug/app-debug.apk "Super-Bot-v$VERSION.apk"
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Super-Bot-APK-v${{ steps.version.outputs.version }}
-          path: Super-Bot-v${{ steps.version.outputs.version }}.apk
 
       - name: Publish or refresh GitHub Release
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
