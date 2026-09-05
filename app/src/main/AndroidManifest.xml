@@ -1,9 +1,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="true"
+        android:icon="@drawable/logo_super_bot"
         android:label="Super Bot"
+        android:roundIcon="@drawable/logo_super_bot"
         android:theme="@style/Theme.SuperBot">
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">
