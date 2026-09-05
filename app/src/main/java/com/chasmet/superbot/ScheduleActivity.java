@@ -1,12 +1,9 @@
 package com.chasmet.superbot;
 
 import android.app.Activity;
-import android.app.AlarmManager;
-import android.app.PendingIntent;
-import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.os.Bundle;
-import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.DatePicker;
 import android.widget.EditText;
@@ -17,7 +14,6 @@ import android.widget.Toast;
 
 import java.io.File;
 import java.util.Calendar;
-import java.util.Locale;
 
 public class ScheduleActivity extends Activity {
     private String videoPath;
@@ -65,8 +61,19 @@ public class ScheduleActivity extends Activity {
         c.set(Calendar.YEAR, datePicker.getYear());
         c.set(Calendar.MONTH, datePicker.getMonth());
         c.set(Calendar.DAY_OF_MONTH, datePicker.getDayOfMonth());
-        c.set(Calendar.HOUR_OF_DAY, timePicker.getHour());
-        c.set(Calendar.MINUTE, timePicker.getMinute());
+        int hour;
+        int minute;
+        if (Build.VERSION.SDK_INT >= 23) {
+            hour = timePicker.getHour();
+            minute = timePicker.getMinute();
+        } else {
+            Integer h = timePicker.getCurrentHour();
+            Integer m = timePicker.getCurrentMinute();
+            hour = h == null ? 0 : h;
+            minute = m == null ? 0 : m;
+        }
+        c.set(Calendar.HOUR_OF_DAY, hour);
+        c.set(Calendar.MINUTE, minute);
         c.set(Calendar.SECOND, 0);
         c.set(Calendar.MILLISECOND, 0);
         if (c.getTimeInMillis() <= System.currentTimeMillis()) {
@@ -84,27 +91,8 @@ public class ScheduleActivity extends Activity {
         task.scheduledAt = c.getTimeInMillis();
         task.status = "PROGRAMMÉ";
         PublicationTaskRepository.save(this, task);
-        scheduleAlarm(task);
+        BootReceiver.schedule(this, task);
         Toast.makeText(this, "Publication programmée", Toast.LENGTH_LONG).show();
         finish();
-    }
-
-    private void scheduleAlarm(PublicationTask task) {
-        AlarmManager alarm = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-        Intent intent = new Intent(this, PublicationAlarmReceiver.class);
-        intent.putExtra("task_id", task.id);
-        PendingIntent pending = PendingIntent.getBroadcast(
-                this,
-                task.id.hashCode(),
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
-        );
-        if (alarm != null) {
-            try {
-                alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, task.scheduledAt, pending);
-            } catch (SecurityException e) {
-                alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, task.scheduledAt, pending);
-            }
-        }
     }
 }
