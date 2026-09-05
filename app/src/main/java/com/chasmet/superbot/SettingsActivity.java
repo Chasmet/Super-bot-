@@ -1,6 +1,8 @@
 package com.chasmet.superbot;
 
 import android.app.Activity;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.TextView;
@@ -15,7 +17,7 @@ public class SettingsActivity extends Activity {
 
         TextView version = findViewById(R.id.textCurrentVersion);
         if (version != null) {
-            version.setText("Version installée : " + BuildConfig.VERSION_NAME);
+            version.setText("Version installée : " + getInstalledVersionName());
         }
 
         bind(R.id.buttonCheckUpdate, "Recherche de mise à jour lancée");
@@ -27,6 +29,15 @@ public class SettingsActivity extends Activity {
         View back = findViewById(R.id.buttonBack);
         if (back != null) {
             back.setOnClickListener(v -> finish());
+        }
+    }
+
+    private String getInstalledVersionName() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName != null ? info.versionName : "1.0.0";
+        } catch (PackageManager.NameNotFoundException e) {
+            return "1.0.0";
         }
     }
 
