@@ -22,6 +22,8 @@ public class SettingsActivity extends Activity {
     private ProgressBar updateProgress;
     private File downloadedApk;
     private boolean installerLaunched;
+    private boolean waitingPermission;
+    private boolean busy;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -32,6 +34,12 @@ public class SettingsActivity extends Activity {
         automationStatus = findViewById(R.id.textAutomationStatus);
         updateProgress = findViewById(R.id.updateProgress);
 
+        if (savedInstanceState != null) {
+            String path = savedInstanceState.getString("update_apk");
+            if (path != null) downloadedApk = new File(path);
+            waitingPermission = savedInstanceState.getBoolean("update_permission");
+            installerLaunched = savedInstanceState.getBoolean("update_installer");
+        }
         currentVersion.setText("Version installée : " + AppUpdateManager.installedVersion(this));
 
         findViewById(R.id.rowAutomation).setOnClickListener(v -> {
@@ -48,10 +56,51 @@ public class SettingsActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         refreshAutomationStatus();
-        if (downloadedApk != null && downloadedApk.exists() && Build.VERSION.SDK_INT >= 26
-                && getPackageManager().canRequestPackageInstalls() && !installerLaunched) {
+        if (waitingPermission) {
+            waitingPermission = false;
+            if (Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls()) {
+                installDownloaded();
+            } else {
+                latestVersion.setText("Autorisation refusée. Appuie sur le bouton pour réessayer.");
+            }
+        }
+    }
+
+    @Override protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        if (downloadedApk != null) out.putString("update_apk", downloadedApk.getAbsolutePath());
+        out.putBoolean("update_permission", waitingPermission);
+        out.putBoolean("update_installer", installerLaunched);
+    }
+
+    private void installDownloaded() {
+        try {
+            if (installerLaunched) return;
+            updateManager.validateApk(downloadedApk);
+            if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+                waitingPermission = true;
+                latestVersion.setText("Autorise Super Bot à installer la mise à jour, puis reviens ici.");
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        android.net.Uri.parse("package:" + getPackageName())));
+                return;
+            }
             installerLaunched = true;
+            latestVersion.setText("APK vérifié • confirme la mise à jour dans Android");
             updateManager.launchInstaller(this, downloadedApk);
+        } catch (Exception e) {
+            installerLaunched = false;
+            waitingPermission = false;
+            latestVersion.setText("Installation impossible : " + e.getMessage());
+        }
+    }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request == 2002) {
+            installerLaunched = false;
+            downloadedApk = null;
+            latestVersion.setText(result == RESULT_OK ? "Mise à jour installée"
+                    : "Installation annulée ou refusée par Android. Tu peux réessayer.");
         }
     }
 
@@ -77,18 +126,25 @@ public class SettingsActivity extends Activity {
     }
 
     private void checkForUpdate() {
+        if (busy || installerLaunched || waitingPermission) return;
+        if (downloadedApk != null && downloadedApk.exists()) { installDownloaded(); return; }
+        busy = true;
+        findViewById(R.id.buttonCheckUpdate).setEnabled(false);
         latestVersion.setText("Vérification de GitHub Releases…");
         updateProgress.setProgress(0);
         installerLaunched = false;
         updateManager.check(new AppUpdateManager.Listener() {
             @Override public void onCheckResult(AppUpdateManager.ReleaseInfo release) {
                 runOnUiThread(() -> {
+                    if (isDestroyed()) return;
                     if (release.latestVersion == null || release.latestVersion.isEmpty()) {
+                        finishDownload();
                         latestVersion.setText("Aucune Release disponible pour le moment");
                         return;
                     }
                     latestVersion.setText("Dernière version : " + release.latestVersion);
                     if (!release.newer) {
+                        finishDownload();
                         toast("Super Bot est déjà à jour");
                         return;
                     }
@@ -98,25 +154,33 @@ public class SettingsActivity extends Activity {
             }
 
             @Override public void onDownloadProgress(int percent) {
-                runOnUiThread(() -> updateProgress.setProgress(percent));
+                runOnUiThread(() -> { if (isDestroyed()) return; updateProgress.setProgress(percent); latestVersion.setText("Téléchargement : " + percent + " %"); });
             }
 
             @Override public void onDownloaded(File apk) {
-                downloadedApk = apk;
                 runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    downloadedApk = apk;
+                    finishDownload();
                     updateProgress.setProgress(100);
-                    latestVersion.setText("Téléchargement terminé • installation");
-                    updateManager.launchInstaller(SettingsActivity.this, apk);
+                    installDownloaded();
                 });
             }
 
             @Override public void onError(String message) {
                 runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    finishDownload();
                     latestVersion.setText("Mise à jour indisponible : " + message);
-                    toast("Impossible de vérifier la mise à jour");
+
                 });
             }
         });
+    }
+
+    private void finishDownload() {
+        busy = false;
+        findViewById(R.id.buttonCheckUpdate).setEnabled(true);
     }
 
     private void toast(String message) {

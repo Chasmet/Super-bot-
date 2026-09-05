@@ -31,7 +31,8 @@ public class BotAccessibilityService extends AccessibilityService {
         if (root == null) return;
         try {
             if (isTikTok(task)) {
-                if (runTikTok(root, task)) return;
+                runTikTok(root, task);
+                return;
             }
             runGeneric(root, task);
         } finally {
@@ -42,7 +43,7 @@ public class BotAccessibilityService extends AccessibilityService {
     private boolean runTikTok(AccessibilityNodeInfo root, PublicationTask task) {
         String state = getState(task.id);
 
-        if (containsAny(root, "publication programmée", "post scheduled", "programmé", "scheduled")) {
+        if (state.equals("TIKTOK_CONFIRMING") && containsAny(root, "publication programmée", "post scheduled")) {
             finish(task, "PROGRAMMÉ");
             return true;
         }

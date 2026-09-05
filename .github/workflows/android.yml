@@ -3,17 +3,20 @@ name: Build Super Bot APK
 on:
   push:
     branches: [ "main" ]
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: superbot-build-main
-  cancel-in-progress: true
+  group: superbot-build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,24 +29,54 @@ jobs:
           java-version: '17'
 
       - name: Restore locked Super Bot signing key
-        uses: actions/cache@v4
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/restore@v4
         with:
           path: ~/.android/debug.keystore
           key: superbot-debug-keystore-v1
           fail-on-cache-miss: true
 
       - name: Verify signing key exists
+        if: github.event_name != 'pull_request'
         run: |
           test -f ~/.android/debug.keystore
           keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey >/dev/null
+          cp ~/.android/debug.keystore "$RUNNER_TEMP/superbot.keystore"
+          chmod 600 "$RUNNER_TEMP/superbot.keystore"
+          echo "SUPERBOT_KEYSTORE=$RUNNER_TEMP/superbot.keystore" >> "$GITHUB_ENV"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
-        run: gradle assembleDebug
+      - name: Build and audit debug APK
+        run: gradle assembleDebug lintDebug
+
+      - name: Verify compatibility with installed 1.2.1
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/baseline"
+          gh release download v1.2.1 --pattern '*.apk' --dir "$RUNNER_TEMP/baseline"
+          APK_SIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          "$APK_SIGNER" verify --print-certs "$RUNNER_TEMP/baseline/Super-Bot-v1.2.1.apk" > baseline-cert.txt
+          "$APK_SIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk > candidate-cert.txt
+          sed -n '/certificate SHA-256 digest/p' baseline-cert.txt > baseline-sha.txt
+          sed -n '/certificate SHA-256 digest/p' candidate-cert.txt > candidate-sha.txt
+          test -s baseline-sha.txt
+          diff -u baseline-sha.txt candidate-sha.txt
+
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Super-Bot-audit
+          path: |
+            *-cert.txt
+            *-sha.txt
+            app/build/reports/lint-results-debug.*
 
       - name: Prepare APK name
         id: version
@@ -59,6 +92,7 @@ jobs:
           path: Super-Bot-v${{ steps.version.outputs.version }}.apk
 
       - name: Publish or refresh GitHub Release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -66,7 +100,8 @@ jobs:
           TAG="v$VERSION"
           APK="Super-Bot-v$VERSION.apk"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK" --clobber
+            echo "Release existante : incrémenter la version avant publication."
+            exit 1
           else
             gh release create "$TAG" "$APK" \
               --title "Super Bot v$VERSION" \
