@@ -16,7 +16,6 @@
             android:layout_height="56dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
-
             <TextView
                 android:id="@+id/buttonBack"
                 android:layout_width="48dp"
@@ -25,7 +24,6 @@
                 android:text="‹"
                 android:textColor="#FFFFFF"
                 android:textSize="36sp" />
-
             <TextView
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
@@ -44,20 +42,17 @@
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:padding="16dp">
-
             <ImageView
                 android:layout_width="72dp"
                 android:layout_height="72dp"
                 android:contentDescription="Logo Super Bot"
                 android:src="@drawable/logo_super_bot" />
-
             <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="14dp"
                 android:layout_weight="1"
                 android:orientation="vertical">
-
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
@@ -65,7 +60,6 @@
                     android:textColor="#FFFFFF"
                     android:textSize="22sp"
                     android:textStyle="bold" />
-
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
@@ -85,17 +79,30 @@
             android:textSize="12sp"
             android:textStyle="bold" />
 
-        <TextView
+        <LinearLayout
             android:id="@+id/rowAutomation"
             android:layout_width="match_parent"
-            android:layout_height="66dp"
+            android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:background="#102039"
-            android:gravity="center_vertical"
-            android:padding="16dp"
-            android:text="⚙  Automatisation Android\n     Permissions et contrôle du téléphone"
-            android:textColor="#FFFFFF"
-            android:textSize="15sp" />
+            android:orientation="vertical"
+            android:padding="16dp">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="⚙  Automatisation Android"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+            <TextView
+                android:id="@+id/textAutomationStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="5dp"
+                android:text="Service Super Bot : vérification…"
+                android:textColor="#FFB84D"
+                android:textSize="13sp" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/rowAccounts"
@@ -105,7 +112,7 @@
             android:background="#102039"
             android:gravity="center_vertical"
             android:padding="16dp"
-            android:text="👤  Comptes sociaux\n     TikTok • Instagram • YouTube"
+            android:text="👤  Comptes sociaux\n     Utilise les comptes déjà ouverts dans TikTok, Instagram et YouTube"
             android:textColor="#FFFFFF"
             android:textSize="15sp" />
 
@@ -125,7 +132,6 @@
             android:background="#102039"
             android:orientation="vertical"
             android:padding="16dp">
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -133,46 +139,31 @@
                 android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="État : non connecté"
-                android:textColor="#FFB84D"
-                android:textSize="14sp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="Le MCP permettra à ChatGPT d'envoyer les missions au Bot Chef et de recevoir l'état des publications."
+                android:layout_marginTop="5dp"
+                android:text="Prévu pour la prochaine mise à jour. Le moteur local fonctionne déjà sans MCP."
                 android:textColor="#A9B9D2"
                 android:textSize="13sp" />
-
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
+                android:layout_marginTop="12dp"
                 android:orientation="horizontal">
-
                 <Button
                     android:id="@+id/buttonMcpConnect"
                     android:layout_width="0dp"
                     android:layout_height="48dp"
                     android:layout_weight="1"
                     android:text="Connecter" />
-
-                <Space
-                    android:layout_width="8dp"
-                    android:layout_height="1dp" />
-
+                <Space android:layout_width="8dp" android:layout_height="1dp" />
                 <Button
                     android:id="@+id/buttonMcpTest"
                     android:layout_width="0dp"
                     android:layout_height="48dp"
                     android:layout_weight="1"
-                    android:text="Tester" />
+                    android:text="État" />
             </LinearLayout>
         </LinearLayout>
 
@@ -192,46 +183,43 @@
             android:background="#102039"
             android:orientation="vertical"
             android:padding="16dp">
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Mise à jour de l'application"
+                android:text="Mise à jour directe depuis GitHub Releases"
                 android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
-
             <TextView
                 android:id="@+id/textCurrentVersion"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
-                android:text="Version installée : 1.0.0"
+                android:text="Version installée : …"
                 android:textColor="#A9B9D2"
                 android:textSize="14sp" />
-
             <TextView
-                android:layout_width="wrap_content"
+                android:id="@+id/textLatestVersion"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="Dernière version disponible : vérification nécessaire"
+                android:text="Dernière version : vérification nécessaire"
                 android:textColor="#63E6FF"
                 android:textSize="14sp" />
-
             <ProgressBar
+                android:id="@+id/updateProgress"
                 style="?android:attr/progressBarStyleHorizontal"
                 android:layout_width="match_parent"
                 android:layout_height="8dp"
                 android:layout_marginTop="14dp"
                 android:max="100"
                 android:progress="0" />
-
             <Button
                 android:id="@+id/buttonCheckUpdate"
                 android:layout_width="match_parent"
                 android:layout_height="48dp"
                 android:layout_marginTop="12dp"
-                android:text="Rechercher une mise à jour" />
+                android:text="Rechercher et installer une mise à jour" />
         </LinearLayout>
 
         <TextView
@@ -247,27 +235,48 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:layout_marginBottom="30dp"
             android:background="#102039"
             android:orientation="vertical"
             android:padding="16dp">
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Version 1.0.0"
+                android:text="Version 1.1.0 • moteur local"
                 android:textColor="#FFFFFF"
                 android:textSize="17sp"
                 android:textStyle="bold" />
-
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="7dp"
-                android:text="• Nouvelle interface Super Bot\n• Bot Chef et 4 bots sociaux\n• Studio vidéo et bibliothèque\n• Programmation des publications\n• Section MCP\n• Système de mises à jour intégré"
+                android:text="• Import vidéo Android\n• Aperçu vidéo\n• Découpe MP4 15/30/60/90 s et durée personnalisée\n• Rognage manuel début/fin\n• Bibliothèque locale et partage\n• Programmation TikTok, Instagram, YouTube Shorts et YouTube classique\n• File d'attente persistante\n• Restauration après redémarrage ou mise à jour\n• Moteur AccessibilityService pour piloter les réseaux\n• Mise à jour intégrée depuis GitHub Releases"
                 android:textColor="#B8C6DA"
                 android:textSize="14sp"
                 android:lineSpacingExtra="3dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="30dp"
+            android:background="#102039"
+            android:orientation="vertical"
+            android:padding="16dp">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Version 1.0.0 • interface"
+                android:textColor="#FFFFFF"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="7dp"
+                android:text="• Interface Super Bot\n• Bot Chef et 4 bots sociaux\n• Réglages, MCP et système de mise à jour"
+                android:textColor="#B8C6DA"
+                android:textSize="14sp" />
         </LinearLayout>
     </LinearLayout>
 </ScrollView>
