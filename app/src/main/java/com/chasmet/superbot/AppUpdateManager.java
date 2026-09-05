@@ -14,6 +14,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -40,8 +41,11 @@ public final class AppUpdateManager {
                 int code = connection.getResponseCode();
                 if (code < 200 || code >= 300) throw new IllegalStateException("GitHub HTTP " + code);
                 String json;
-                try (InputStream in = connection.getInputStream()) {
-                    json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                try (InputStream in = connection.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
+                    json = new String(out.toByteArray(), StandardCharsets.UTF_8);
                 }
                 JSONObject release = new JSONObject(json);
                 String tag = cleanVersion(release.optString("tag_name", ""));
@@ -83,7 +87,9 @@ public final class AppUpdateManager {
                 int code = connection.getResponseCode();
                 if (code < 200 || code >= 300) throw new IllegalStateException("Téléchargement HTTP " + code);
                 long length = connection.getContentLengthLong();
-                File dir = new File(context.getExternalCacheDir(), "updates");
+                File cacheRoot = context.getExternalCacheDir();
+                if (cacheRoot == null) cacheRoot = context.getCacheDir();
+                File dir = new File(cacheRoot, "updates");
                 if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("Dossier de mise à jour impossible");
                 File apk = new File(dir, "Super-Bot-" + release.latestVersion + ".apk");
                 try (InputStream in = new BufferedInputStream(connection.getInputStream());
