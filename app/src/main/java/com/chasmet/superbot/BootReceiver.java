@@ -11,6 +11,8 @@ import java.util.List;
 
 public class BootReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context context, Intent intent) {
+        McpConnectionService.start(context);
+
         long now = System.currentTimeMillis();
         List<PublicationTask> tasks = PublicationTaskRepository.load(context);
         for (PublicationTask task : tasks) {
