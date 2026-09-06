@@ -7,7 +7,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.TextUtils;
-import android.view.View;
+import android.widget.Button;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -19,6 +19,8 @@ public class SettingsActivity extends Activity {
     private TextView currentVersion;
     private TextView latestVersion;
     private TextView automationStatus;
+    private TextView botModeStatus;
+    private Button botPowerButton;
     private ProgressBar updateProgress;
     private File downloadedApk;
     private boolean installerLaunched;
@@ -32,6 +34,8 @@ public class SettingsActivity extends Activity {
         currentVersion = findViewById(R.id.textCurrentVersion);
         latestVersion = findViewById(R.id.textLatestVersion);
         automationStatus = findViewById(R.id.textAutomationStatus);
+        botModeStatus = findViewById(R.id.textBotMode);
+        botPowerButton = findViewById(R.id.buttonBotPower);
         updateProgress = findViewById(R.id.updateProgress);
 
         if (savedInstanceState != null) {
@@ -41,7 +45,7 @@ public class SettingsActivity extends Activity {
             installerLaunched = savedInstanceState.getBoolean("update_installer");
         }
         currentVersion.setText("Version installée : " + AppUpdateManager.installedVersion(this));
-        android.widget.Button diagnostic = new android.widget.Button(this);
+        Button diagnostic = new Button(this);
         diagnostic.setText("Partager le diagnostic de l'horloge");
         ((android.view.ViewGroup) currentVersion.getParent()).addView(diagnostic);
         diagnostic.setOnClickListener(v -> shareClockDiagnostic());
@@ -51,15 +55,36 @@ public class SettingsActivity extends Activity {
             catch (Exception e) { toast("Réglages d'accessibilité indisponibles"); }
         });
         findViewById(R.id.rowAccounts).setOnClickListener(v -> toast("Super Bot utilise les comptes déjà connectés dans TikTok, Instagram et YouTube"));
+        botPowerButton.setOnClickListener(v -> toggleBotPower());
         findViewById(R.id.buttonMcpConnect).setOnClickListener(v -> toast("MCP prévu pour la prochaine mise à jour"));
         findViewById(R.id.buttonMcpTest).setOnClickListener(v -> toast("Le moteur local fonctionne sans MCP"));
         findViewById(R.id.buttonCheckUpdate).setOnClickListener(v -> checkForUpdate());
         findViewById(R.id.buttonBack).setOnClickListener(v -> finish());
+        refreshBotMode();
+    }
+
+    private void toggleBotPower() {
+        boolean newState = !PublicationAlarmReceiver.isSuperBotAwake(this);
+        PublicationAlarmReceiver.setSuperBotAwake(this, newState);
+        refreshBotMode();
+        if (newState) {
+            toast("Super Bot est connecté et réveillé");
+        } else {
+            toast("Super Bot est déconnecté. Il dort et ne fera plus aucune action automatique.");
+        }
+    }
+
+    private void refreshBotMode() {
+        boolean awake = PublicationAlarmReceiver.isSuperBotAwake(this);
+        botModeStatus.setText(awake ? "Super Bot : CONNECTÉ • réveillé" : "Super Bot : DÉCONNECTÉ • en veille");
+        botModeStatus.setTextColor(awake ? 0xFF59E391 : 0xFFFFB84D);
+        botPowerButton.setText(awake ? "DÉCONNECTER SUPER BOT" : "CONNECTER SUPER BOT");
     }
 
     @Override protected void onResume() {
         super.onResume();
         refreshAutomationStatus();
+        refreshBotMode();
         if (waitingPermission) {
             waitingPermission = false;
             if (Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls()) {
@@ -197,7 +222,6 @@ public class SettingsActivity extends Activity {
                     if (isDestroyed()) return;
                     finishDownload();
                     latestVersion.setText("Mise à jour indisponible : " + message);
-
                 });
             }
         });
