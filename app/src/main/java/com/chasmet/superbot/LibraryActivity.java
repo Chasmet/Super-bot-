@@ -44,7 +44,7 @@ public class LibraryActivity extends Activity {
         File root = new File(getExternalFilesDir(null), "Movies/SuperBot");
         List<File> videos = new ArrayList<>();
         collect(root, videos);
-        videos.sort((a,b) -> Long.compare(b.lastModified(), a.lastModified()));
+        java.util.Collections.sort(videos, (a,b) -> Long.compare(b.lastModified(), a.lastModified()));
         long bytes = 0;
         for (File f : videos) bytes += f.length();
         summary.setText(videos.size() + " vidéo(s) • " + readable(bytes));

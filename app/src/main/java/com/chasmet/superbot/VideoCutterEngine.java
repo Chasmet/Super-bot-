@@ -111,7 +111,15 @@ public final class VideoCutterEngine {
                 info.offset = 0;
                 info.size = size;
                 info.presentationTimeUs = Math.max(0L, pts - firstPts);
-                info.flags = extractor.getSampleFlags();
+                int sampleFlags = extractor.getSampleFlags();
+                if ((sampleFlags & MediaExtractor.SAMPLE_FLAG_ENCRYPTED) != 0) {
+                    throw new IllegalArgumentException("Les vidéos chiffrées ne sont pas prises en charge");
+                }
+                if ((sampleFlags & 4) != 0) {
+                    throw new IllegalArgumentException("Échantillon vidéo fragmenté non pris en charge");
+                }
+                info.flags = (sampleFlags & MediaExtractor.SAMPLE_FLAG_SYNC) != 0
+                        ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0;
                 muxer.writeSampleData(outTrack, buffer, info);
                 extractor.advance();
             }

@@ -33,7 +33,7 @@ public class QueueActivity extends Activity {
         if (list == null) return;
         list.removeAllViews();
         List<PublicationTask> tasks = PublicationTaskRepository.load(this);
-        tasks.sort((a,b) -> Long.compare(a.scheduledAt, b.scheduledAt));
+        java.util.Collections.sort(tasks, (a,b) -> Long.compare(a.scheduledAt, b.scheduledAt));
         if (tasks.isEmpty()) {
             TextView empty = new TextView(this);
             empty.setText("Aucune publication programmée");

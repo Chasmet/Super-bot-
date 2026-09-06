@@ -3,17 +3,22 @@ name: Build Super Bot APK
 on:
   push:
     branches: [ "main" ]
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 concurrency:
-  group: superbot-build-main
-  cancel-in-progress: true
+  group: superbot-build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    permissions:
+      contents: write
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -26,24 +31,29 @@ jobs:
           java-version: '17'
 
       - name: Restore locked Super Bot signing key
-        uses: actions/cache@v4
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/cache/restore@v4
         with:
           path: ~/.android/debug.keystore
           key: superbot-debug-keystore-v1
           fail-on-cache-miss: true
 
       - name: Verify signing key exists
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
           test -f ~/.android/debug.keystore
           keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey >/dev/null
+          cp ~/.android/debug.keystore "$RUNNER_TEMP/superbot.keystore"
+          chmod 600 "$RUNNER_TEMP/superbot.keystore"
+          echo "SUPERBOT_KEYSTORE=$RUNNER_TEMP/superbot.keystore" >> "$GITHUB_ENV"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
-        run: gradle assembleDebug
+      - name: Build and audit debug APK
+        run: gradle assembleDebug lintDebug
 
       - name: Prepare APK name
         id: version
@@ -52,13 +62,46 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           cp app/build/outputs/apk/debug/app-debug.apk "Super-Bot-v$VERSION.apk"
 
+      - name: Write installation warning
+        run: |
+          echo "APK DE TEST : ne pas désinstaller la version existante. La compatibilité avec 1.2.1 est vérifiée séparément ; cet artifact ne constitue pas une mise à jour validée." > INSTALLATION.txt
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Super-Bot-APK-v${{ steps.version.outputs.version }}
-          path: Super-Bot-v${{ steps.version.outputs.version }}.apk
+          name: Super-Bot-TEST-v${{ steps.version.outputs.version }}
+          path: |
+            Super-Bot-v${{ steps.version.outputs.version }}.apk
+            INSTALLATION.txt
+
+      - name: Verify compatibility with installed 1.2.5
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/baseline"
+          gh run download 33994841835 --name Super-Bot-TEST-v1.2.5 --dir "$RUNNER_TEMP/baseline"
+          APK_SIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          "$APK_SIGNER" verify --print-certs "$RUNNER_TEMP/baseline/Super-Bot-v1.2.5.apk" > baseline-cert.txt
+          "$APK_SIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk > candidate-cert.txt
+          sed -n '/certificate SHA-256 digest/p' baseline-cert.txt > baseline-sha.txt
+          sed -n '/certificate SHA-256 digest/p' candidate-cert.txt > candidate-sha.txt
+          test -s baseline-sha.txt
+          grep -q "6798fe9d02ce6b646912315efcd6cd819ea4e7b5157c7bb9fe7bc7b0f8a96fac" baseline-sha.txt
+          diff -u baseline-sha.txt candidate-sha.txt
+
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Super-Bot-audit
+          path: |
+            *-cert.txt
+            *-sha.txt
+            app/build/reports/lint-results-debug.*
 
       - name: Publish or refresh GitHub Release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -66,9 +109,10 @@ jobs:
           TAG="v$VERSION"
           APK="Super-Bot-v$VERSION.apk"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK" --clobber
+            echo "Release existante : incrémenter la version avant publication."
+            exit 1
           else
-            gh release create "$TAG" "$APK" \
+            gh release create "$TAG" "$APK" --latest --target "$GITHUB_SHA" \
               --title "Super Bot v$VERSION" \
               --notes "Mise à jour Super Bot v$VERSION. Téléchargeable directement depuis Réglages > Mises à jour dans l'application."
           fi
