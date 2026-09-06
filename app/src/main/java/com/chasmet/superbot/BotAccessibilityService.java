@@ -7,570 +7,200 @@ import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
-import android.text.TextUtils;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
-
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Calendar;
-import java.util.Collections;
-import java.util.List;
-import java.util.Locale;
+import java.util.*;
 
 @SuppressLint("NewApi")
 public class BotAccessibilityService extends AccessibilityService {
-    private long lastActionAt;
-    private final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
-    private final Runnable retryRunnable = this::processCurrentWindow;
-    private String activeTask = "";
-    private int retryCount;
+  private long lastActionAt;
+  private final android.os.Handler h=new android.os.Handler(android.os.Looper.getMainLooper());
+  private final Runnable retry=this::tick;
+  private String active=""; private int tries;
 
-    @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (!isBotAwake()) return;
-        if (event == null || event.getPackageName() == null) return;
-        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("active_task_id", "");
-        if (taskId.isEmpty()) return;
-        PublicationTask task = PublicationTaskRepository.find(this, taskId);
-        if (task == null) return;
-        String expected = PublicationAlarmReceiver.packageFor(task.platform);
-        if (expected == null || !expected.equals(event.getPackageName().toString())) return;
-        if (System.currentTimeMillis() - lastActionAt < 450L) return;
-        handler.removeCallbacks(retryRunnable);
-        processTask(task);
-        handler.postDelayed(retryRunnable, 800L);
+  @Override public void onAccessibilityEvent(AccessibilityEvent e){
+    if(!awake()||e==null||e.getPackageName()==null)return;
+    String id=p().getString("active_task_id","");
+    if(id.isEmpty())return;
+    PublicationTask t=PublicationTaskRepository.find(this,id);
+    if(t==null)return;
+    String pkg=PublicationAlarmReceiver.packageFor(t.platform);
+    if(pkg==null||!pkg.equals(e.getPackageName().toString()))return;
+    if(System.currentTimeMillis()-lastActionAt<450)return;
+    h.removeCallbacks(retry); process(t); h.postDelayed(retry,800);
+  }
+  private android.content.SharedPreferences p(){return getSharedPreferences("superbot_bot_state",MODE_PRIVATE);}
+  private boolean awake(){return PublicationAlarmReceiver.isSuperBotAwake(this);}
+  private void tick(){
+    if(!awake()){h.removeCallbacks(retry);return;}
+    String id=p().getString("active_task_id",""); if(id.isEmpty())return;
+    PublicationTask t=PublicationTaskRepository.find(this,id); if(t==null)return;
+    process(t); h.removeCallbacks(retry); h.postDelayed(retry,800);
+  }
+  private void process(PublicationTask t){
+    if(!t.id.equals(active)){active=t.id;tries=0;clearPicker(t.id);}
+    if(++tries>360){mark(t,"TIKTOK_PAUSED","TIKTOK — délai dépassé");h.removeCallbacks(retry);return;}
+    AccessibilityNodeInfo r=getRootInActiveWindow(); if(r==null)return;
+    try{
+      String pkg=PublicationAlarmReceiver.packageFor(t.platform);
+      if(r.getPackageName()==null||pkg==null||!pkg.equals(r.getPackageName().toString()))return;
+      if(isTikTok(t))tikTok(r,t);else generic(r,t);
+    }finally{r.recycle();}
+  }
+  private void tikTok(AccessibilityNodeInfo r,PublicationTask t){
+    String s=state(t.id); if("TIKTOK_PAUSED".equals(s))return;
+    if("TIKTOK_CONFIRMING".equals(s)&&has(r,"publication programmée","post scheduled","scheduled")){finish(t,"PROGRAMMÉ");return;}
+    if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}
+    if(has(r,"Ta Story","Your Story")&&click(r,"Suivant","Next")){mark(t,"TIKTOK_NEXT","TIKTOK — Suivant");return;}
+    if(has(r,"Programmer la publication","Schedule post")&&schedule(r)){
+      clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte");return;
     }
-
-    private boolean isBotAwake() {
-        return getSharedPreferences("superbot_control", MODE_PRIVATE).getBoolean("bot_awake", true);
+    boolean post=has(r,"Publier","Post","Brouillons","Drafts")||has(r,"Ajouter un lien","Add link")||has(r,"Plus d’options","Plus d'options","More options");
+    if(post){
+      if(!p().getBoolean("meta_ok_"+t.id,false)){if(!meta(r,t))return;mark(t,"TIKTOK_METADATA","TIKTOK — métadonnées vérifiées");return;}
+      if(click(r,"Plus d’options","Plus d'options","More options")){mark(t,"TIKTOK_MORE_OPTIONS","TIKTOK — Plus d'options");return;}
+      if(scroll(r)||swipeUp()){mark(t,"TIKTOK_FIND_MORE_OPTIONS","TIKTOK — recherche Plus d'options");return;}
     }
-
-    private void processCurrentWindow() {
-        if (!isBotAwake()) {
-            handler.removeCallbacks(retryRunnable);
-            return;
+    if("TIKTOK_MORE_OPTIONS".equals(s)||"TIKTOK_FIND_SCHEDULE".equals(s)||"TIKTOK_FIND_MORE_OPTIONS".equals(s)){
+      if(schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte");return;}
+      if(scroll(r)||swipeUp()){mark(t,"TIKTOK_FIND_SCHEDULE","TIKTOK — recherche programmation");return;}
+    }
+    if("TIKTOK_SCHEDULE_READY".equals(s)){if(click(r,"Publier","Post"))mark(t,"TIKTOK_CONFIRMING","TIKTOK — validation");return;}
+    if(click(r,"Suivant","Next","Continuer","Continue"))mark(t,"TIKTOK_NEXT","TIKTOK — navigation");
+  }
+  private boolean meta(AccessibilityNodeInfo r,PublicationTask t){
+    String want=PublicationAlarmReceiver.buildMetadata(t).trim();
+    if(want.isEmpty()){p().edit().putBoolean("meta_ok_"+t.id,true).apply();return true;}
+    List<AccessibilityNodeInfo> fs=new ArrayList<>(); editable(r,fs);
+    try{
+      for(AccessibilityNodeInfo f:fs){
+        if(!f.isVisibleToUser())continue;
+        String cur=f.getText()==null?"":f.getText().toString().trim();
+        if(want.equals(cur)){p().edit().putBoolean("meta_ok_"+t.id,true).apply();return true;}
+        String d=desc(f);
+        if(!(d.contains("description")||d.contains("caption")||d.contains("légende")||d.contains("legende")||fs.size()==1))continue;
+        f.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+        boolean ok=set(f,want);
+        if(!ok){
+          android.content.ClipboardManager cb=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+          if(cb!=null){cb.setPrimaryClip(android.content.ClipData.newPlainText("Super Bot",want));ok=f.performAction(AccessibilityNodeInfo.ACTION_PASTE);}
         }
-        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("active_task_id", "");
-        if (taskId.isEmpty()) return;
-        PublicationTask task = PublicationTaskRepository.find(this, taskId);
-        if (task == null) return;
-        processTask(task);
-        handler.removeCallbacks(retryRunnable);
-        handler.postDelayed(retryRunnable, 800L);
-    }
-
-    private void processTask(PublicationTask task) {
-        if (!task.id.equals(activeTask)) {
-            activeTask = task.id;
-            retryCount = 0;
-            clearPickerState(task.id);
+        mark(t,"TIKTOK_METADATA_PENDING",ok?"TIKTOK — texte envoyé":"TIKTOK — texte inaccessible");return false;
+      }
+    }finally{recycle(fs);}
+    if(click(r,"Ajouter une description","Add description","Add a description"))mark(t,"TIKTOK_METADATA_PENDING","TIKTOK — champ description ouvert");
+    return false;
+  }
+  private void picker(AccessibilityNodeInfo r,PublicationTask t){
+    if(Build.VERSION.SDK_INT<24){mark(t,"TIKTOK_PAUSED","TIKTOK — Android < 24");return;}
+    if(t.scheduledAt<=System.currentTimeMillis()+60000){mark(t,"TIKTOK_PAUSED","TIKTOK — date dépassée ou trop proche");return;}
+    Rect screen=new Rect();r.getBoundsInScreen(screen);if(screen.width()<=0)return;
+    Cols c=columns(r,screen,t.id);if(!c.ok()){mark(t,"TIKTOK_PICKER_WAIT","TIKTOK — lecture horloge");return;}
+    Calendar target=Calendar.getInstance();target.setTimeInMillis(t.scheduledAt);
+    Calendar date=parseDate(c.d.v);Integer hour=num(c.h.v),minute=num(c.m.v);
+    diag(t,c,target);
+    if(date==null||hour==null||minute==null){mark(t,"TIKTOK_PICKER_WAIT","TIKTOK — valeur centrale non reconnue");return;}
+    if(!sameDay(date,target)){verifyReset(t.id);gesture(c.d,target.after(date)?1:-1,t,"date → "+fmtDate(target));return;}
+    int wh=target.get(Calendar.HOUR_OF_DAY);
+    if(hour!=wh){verifyReset(t.id);gesture(c.h,dir(hour,wh,24),t,"heure → "+String.format(Locale.FRANCE,"%02d",wh));return;}
+    int wm=target.get(Calendar.MINUTE);
+    if(minute!=wm){verifyReset(t.id);gesture(c.m,dir(minute,wm,60),t,"minutes → "+String.format(Locale.FRANCE,"%02d",wm));return;}
+    int n=p().getInt("picker_verified_"+t.id,0)+1;p().edit().putInt("picker_verified_"+t.id,n).apply();
+    if(n<2){mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — double contrôle");return;}
+    if(click(r,"Terminé","Done"))mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées");
+  }
+  private Cols columns(AccessibilityNodeInfo r,Rect screen,String id){
+    List<AccessibilityNodeInfo> ns=new ArrayList<>();labels(r,ns);
+    List<L> ds=new ArrayList<>(),hs=new ArrayList<>(),ms=new ArrayList<>();
+    try{
+      for(AccessibilityNodeInfo n:ns){
+        if(!n.isVisibleToUser()||n.getText()==null)continue;
+        String tx=n.getText().toString().trim();Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;
+        float x=b.centerX()/(float)screen.width();
+        if(dateLabel(tx)&&x<.55f)ds.add(new L(tx,b.centerX(),b.centerY()));
+        else if(tx.matches("[0-9]{1,2}")){
+          if(x>=.43f&&x<.72f)hs.add(new L(tx,b.centerX(),b.centerY()));
+          else if(x>=.72f)ms.add(new L(tx,b.centerX(),b.centerY()));
         }
-        if (++retryCount > 360) {
-            mark(task, "TIKTOK_PAUSED", "TIKTOK — délai dépassé, vérifier l'écran");
-            handler.removeCallbacks(retryRunnable);
-            return;
-        }
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
-        try {
-            CharSequence pkg = root.getPackageName();
-            String expected = PublicationAlarmReceiver.packageFor(task.platform);
-            if (pkg == null || expected == null || !expected.equals(pkg.toString())) return;
-            if (isTikTok(task)) runTikTok(root, task);
-            else runGeneric(root, task);
-        } finally {
-            root.recycle();
-        }
+      }
+    }finally{recycle(ns);}
+    int y=p().getInt("picker_center_y_"+id,-1);
+    if(y<0){
+      for(L q:ds){String n=norm(q.v);if(n.contains("aujourd'hui")||n.contains("today")){y=q.y;break;}}
+      if(y<0&&!ds.isEmpty()){sort(ds);y=ds.get(0).y;}
+      if(y>=0)p().edit().putInt("picker_center_y_"+id,y).apply();
     }
-
-    private void runTikTok(AccessibilityNodeInfo root, PublicationTask task) {
-        String state = getState(task.id);
-        if ("TIKTOK_PAUSED".equals(state)) return;
-
-        if ("TIKTOK_CONFIRMING".equals(state)
-                && containsAny(root, "publication programmée", "post scheduled", "scheduled")) {
-            finish(task, "PROGRAMMÉ");
-            return;
-        }
-
-        if (containsAny(root, "Date et heure de publication", "Date and time of publication")) {
-            adjustTikTokPicker(root, task);
-            return;
-        }
-
-        // Écran de montage TikTok : la vidéo montre qu'il faut d'abord appuyer sur Suivant.
-        // On le traite AVANT la recherche du champ de description, sinon le bot reste bloqué ici.
-        if (looksLikeTikTokEditor(root)) {
-            if (clickFirst(root, "Suivant", "Next")) {
-                mark(task, "TIKTOK_NEXT", "TIKTOK — Suivant appuyé automatiquement");
-                return;
-            }
-        }
-
-        // Fenêtre Plus d'options : Programmer la publication est la priorité absolue.
-        if (containsAny(root, "Programmer la publication", "Schedule post")) {
-            if (clickScheduleControl(root)) {
-                clearPickerState(task.id);
-                mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — Programmer la publication ouvert");
-                return;
-            }
-        }
-
-        // Écran de publication : remplir puis relire le texte.
-        if (looksLikeTikTokPostScreen(root)) {
-            if (!getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                    .getBoolean("meta_ok_" + task.id, false)) {
-                if (!ensureTikTokMetadata(root, task)) return;
-                mark(task, "TIKTOK_METADATA", "TIKTOK — métadonnées vérifiées");
-                return;
-            }
-
-            // Plus d'options peut être tout en bas de la page.
-            if (containsAny(root, "Plus d’options", "Plus d'options", "More options")) {
-                if (clickFirst(root, "Plus d’options", "Plus d'options", "More options")) {
-                    mark(task, "TIKTOK_MORE_OPTIONS", "TIKTOK — Plus d'options ouvert automatiquement");
-                    return;
-                }
-            }
-
-            if (scrollForward(root) || swipePageUp(task)) {
-                mark(task, "TIKTOK_FIND_MORE_OPTIONS", "TIKTOK — défilement vers Plus d'options");
-                return;
-            }
-        }
-
-        if ("TIKTOK_MORE_OPTIONS".equals(state) || "TIKTOK_FIND_SCHEDULE".equals(state)) {
-            if (clickScheduleControl(root)) {
-                clearPickerState(task.id);
-                mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — programmation ouverte");
-                return;
-            }
-            if (scrollForward(root) || swipePageUp(task)) {
-                mark(task, "TIKTOK_FIND_SCHEDULE", "TIKTOK — recherche de Programmer la publication");
-                return;
-            }
-        }
-
-        if ("TIKTOK_SCHEDULE_READY".equals(state)) {
-            if (clickFirst(root, "Publier", "Post")) {
-                mark(task, "TIKTOK_CONFIRMING", "TIKTOK — validation de la programmation");
-            }
-            return;
-        }
-
-        if (clickFirst(root, "Suivant", "Next", "Continuer", "Continue")) {
-            mark(task, "TIKTOK_NEXT", "TIKTOK — navigation en cours");
-        }
-    }
-
-    private static boolean looksLikeTikTokEditor(AccessibilityNodeInfo root) {
-        return containsAny(root, "Ta Story", "Your Story") && containsAny(root, "Suivant", "Next");
-    }
-
-    private static boolean looksLikeTikTokPostScreen(AccessibilityNodeInfo root) {
-        return containsAny(root, "Publier", "Post", "Brouillons", "Drafts")
-                || containsAny(root, "Ajouter un lien", "Add link", "Paramètres de confidentialité", "Privacy settings")
-                || containsAny(root, "Plus d’options", "Plus d'options", "More options");
-    }
-
-    private boolean ensureTikTokMetadata(AccessibilityNodeInfo root, PublicationTask task) {
-        String expected = PublicationAlarmReceiver.buildMetadata(task).trim();
-        if (expected.isEmpty()) {
-            getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putBoolean("meta_ok_" + task.id, true).apply();
-            return true;
-        }
-        List<AccessibilityNodeInfo> fields = new ArrayList<>();
-        collectEditable(root, fields);
-        try {
-            for (AccessibilityNodeInfo field : fields) {
-                if (!field.isVisibleToUser()) continue;
-                String current = field.getText() == null ? "" : field.getText().toString().trim();
-                if (expected.equals(current)) {
-                    getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putBoolean("meta_ok_" + task.id, true).apply();
-                    return true;
-                }
-                String descriptor = descriptor(field);
-                if (!(descriptor.contains("description") || descriptor.contains("caption")
-                        || descriptor.contains("légende") || descriptor.contains("legende") || fields.size() == 1)) continue;
-                field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-                boolean ok = setText(field, expected);
-                if (!ok) {
-                    android.content.ClipboardManager cb = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                    if (cb != null) {
-                        cb.setPrimaryClip(android.content.ClipData.newPlainText("Super Bot", expected));
-                        ok = field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
-                    }
-                }
-                mark(task, "TIKTOK_METADATA_PENDING", ok ? "TIKTOK — texte complet envoyé" : "TIKTOK — champ texte inaccessible");
-                return false;
-            }
-        } finally {
-            recycle(fields);
-        }
-        if (clickFirst(root, "Ajouter une description", "Add description", "Add a description")) {
-            mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — ouverture du champ description");
-        }
-        return false;
-    }
-
-    private void adjustTikTokPicker(AccessibilityNodeInfo root, PublicationTask task) {
-        if (Build.VERSION.SDK_INT < 24) {
-            mark(task, "TIKTOK_PAUSED", "TIKTOK — Android trop ancien pour piloter les roues");
-            return;
-        }
-        if (task.scheduledAt <= System.currentTimeMillis() + 60000L) {
-            mark(task, "TIKTOK_PAUSED", "TIKTOK — date programmée trop proche ou dépassée");
-            return;
-        }
-
-        Rect screen = new Rect();
-        root.getBoundsInScreen(screen);
-        if (screen.width() <= 0 || screen.height() <= 0) return;
-        PickerColumns columns = readPickerColumns(root, screen);
-        if (!columns.ready()) {
-            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture des trois roues en cours");
-            return;
-        }
-
-        Calendar target = Calendar.getInstance();
-        target.setTimeInMillis(task.scheduledAt);
-        Calendar currentDate = parseVisibleDate(columns.date.value);
-        if (currentDate == null) {
-            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — date centrale non reconnue");
-            return;
-        }
-        if (!sameDay(currentDate, target)) {
-            int direction = target.after(currentDate) ? 1 : -1;
-            resetVerify(task.id);
-            dispatchWheelGesture(columns.date, direction, task, "date vers " + formatDate(target));
-            return;
-        }
-
-        Integer currentHour = parseNumber(columns.hour.value);
-        if (currentHour == null) return;
-        int wantedHour = target.get(Calendar.HOUR_OF_DAY);
-        if (currentHour != wantedHour) {
-            resetVerify(task.id);
-            dispatchWheelGesture(columns.hour, shortestCircularDirection(currentHour, wantedHour, 24), task,
-                    "heure vers " + String.format(Locale.FRANCE, "%02d", wantedHour));
-            return;
-        }
-
-        Integer currentMinute = parseNumber(columns.minute.value);
-        if (currentMinute == null) return;
-        int wantedMinute = target.get(Calendar.MINUTE);
-        if (currentMinute != wantedMinute) {
-            resetVerify(task.id);
-            dispatchWheelGesture(columns.minute, shortestCircularDirection(currentMinute, wantedMinute, 60), task,
-                    "minutes vers " + String.format(Locale.FRANCE, "%02d", wantedMinute));
-            return;
-        }
-
-        int verified = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getInt("picker_verified_" + task.id, 0) + 1;
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putInt("picker_verified_" + task.id, verified).apply();
-        if (verified < 2) {
-            mark(task, "TIKTOK_PICKER_VERIFY", "TIKTOK — double contrôle date/heure/minutes");
-            return;
-        }
-        if (clickFirst(root, "Terminé", "Done")) {
-            mark(task, "TIKTOK_SCHEDULE_READY", "TIKTOK — date et heure validées");
-        }
-    }
-
-    private PickerColumns readPickerColumns(AccessibilityNodeInfo root, Rect screen) {
-        List<AccessibilityNodeInfo> labels = new ArrayList<>();
-        collectLabels(root, labels);
-        List<PickerLabel> dates = new ArrayList<>();
-        List<PickerLabel> hours = new ArrayList<>();
-        List<PickerLabel> minutes = new ArrayList<>();
-        try {
-            for (AccessibilityNodeInfo node : labels) {
-                if (!node.isVisibleToUser() || node.getText() == null) continue;
-                String text = node.getText().toString().trim();
-                Rect b = new Rect();
-                node.getBoundsInScreen(b);
-                if (b.isEmpty()) continue;
-                float x = b.centerX() / (float) screen.width();
-                if (isDateLabel(text) && x < 0.55f) dates.add(new PickerLabel(text, b.centerX(), b.centerY()));
-                else if (text.matches("[0-9]{1,2}")) {
-                    if (x >= 0.43f && x < 0.72f) hours.add(new PickerLabel(text, b.centerX(), b.centerY()));
-                    else if (x >= 0.72f) minutes.add(new PickerLabel(text, b.centerX(), b.centerY()));
-                }
-            }
-        } finally { recycle(labels); }
-        return new PickerColumns(centerLabel(dates), centerLabel(hours), centerLabel(minutes), spacing(dates), spacing(hours), spacing(minutes));
-    }
-
-    private static void sortPickerLabels(List<PickerLabel> values) {
-        Collections.sort(values, new java.util.Comparator<PickerLabel>() {
-            @Override public int compare(PickerLabel a, PickerLabel b) { return a.y < b.y ? -1 : (a.y == b.y ? 0 : 1); }
-        });
-    }
-
-    private static PickerLabel centerLabel(List<PickerLabel> values) {
-        if (values.isEmpty()) return null;
-        sortPickerLabels(values);
-        return values.get(values.size() / 2);
-    }
-
-    private static float spacing(List<PickerLabel> values) {
-        if (values.size() < 2) return 42f;
-        sortPickerLabels(values);
-        List<Integer> diffs = new ArrayList<>();
-        for (int i = 1; i < values.size(); i++) {
-            int d = values.get(i).y - values.get(i - 1).y;
-            if (d > 8) diffs.add(d);
-        }
-        if (diffs.isEmpty()) return 42f;
-        Collections.sort(diffs);
-        return diffs.get(diffs.size() / 2);
-    }
-
-    private void dispatchWheelGesture(PickerLabel label, int direction, PublicationTask task, String what) {
-        if (Build.VERSION.SDK_INT < 24) return;
-        float distance = Math.max(34f * getResources().getDisplayMetrics().density, label.spacing * 1.25f);
-        distance = Math.min(distance, 120f * getResources().getDisplayMetrics().density);
-        float startY = label.y + (direction > 0 ? distance * 0.55f : -distance * 0.55f);
-        float endY = label.y + (direction > 0 ? -distance * 0.55f : distance * 0.55f);
-        Path path = new Path();
-        path.moveTo(label.x, startY);
-        path.lineTo(label.x, endY);
-        GestureDescription gesture = new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(path, 0, 480)).build();
-        boolean accepted = dispatchGesture(gesture, new GestureResultCallback() {
-            @Override public void onCompleted(GestureDescription g) { handler.removeCallbacks(retryRunnable); handler.postDelayed(retryRunnable, 650L); }
-            @Override public void onCancelled(GestureDescription g) { handler.removeCallbacks(retryRunnable); handler.postDelayed(retryRunnable, 650L); }
-        }, null);
-        lastActionAt = System.currentTimeMillis();
-        mark(task, "TIKTOK_PICKER_GESTURE", accepted ? "TIKTOK — défilement tactile " + what : "TIKTOK — geste refusé " + what);
-    }
-
-    private boolean swipePageUp(PublicationTask task) {
-        if (Build.VERSION.SDK_INT < 24) return false;
-        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
-        float x = dm.widthPixels * 0.50f;
-        float startY = dm.heightPixels * 0.78f;
-        float endY = dm.heightPixels * 0.38f;
-        Path p = new Path();
-        p.moveTo(x, startY);
-        p.lineTo(x, endY);
-        GestureDescription g = new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p, 0, 420)).build();
-        boolean ok = dispatchGesture(g, null, null);
-        if (ok) lastActionAt = System.currentTimeMillis();
-        return ok;
-    }
-
-    private static int shortestCircularDirection(int current, int target, int modulo) {
-        int forward = (target - current + modulo) % modulo;
-        int backward = (current - target + modulo) % modulo;
-        return forward <= backward ? 1 : -1;
-    }
-
-    private static Integer parseNumber(String value) {
-        if (value == null) return null;
-        String only = value.replaceAll("[^0-9]", "");
-        if (only.isEmpty()) return null;
-        try { return Integer.parseInt(only); } catch (NumberFormatException e) { return null; }
-    }
-
-    private static boolean isDateLabel(String text) {
-        if (text == null) return false;
-        String v = text.toLowerCase(Locale.FRANCE).replace("’", "'");
-        if (v.contains("aujourd'hui") || v.contains("today")) return true;
-        return v.matches(".*(janv|févr|fevr|mars|avr|mai|juin|juil|août|aout|sept|oct|nov|déc|dec).*\\d{1,2}.*");
-    }
-
-    private Calendar parseVisibleDate(String text) {
-        if (text == null) return null;
-        String normalized = normalizeDate(text);
-        Calendar today = Calendar.getInstance();
-        zeroTime(today);
-        if (normalized.contains("aujourd'hui") || normalized.contains("today")) return today;
-        for (int offset = 0; offset <= 31; offset++) {
-            Calendar probe = (Calendar) today.clone();
-            probe.add(Calendar.DAY_OF_YEAR, offset);
-            if (dateLabelMatches(normalized, probe)) return probe;
-        }
-        return null;
-    }
-
-    private static String normalizeDate(String text) {
-        return text.toLowerCase(Locale.FRANCE).replace(".", "").replace("’", "'")
-                .replace("é", "e").replace("è", "e").replace("ê", "e").replace("û", "u")
-                .replace("ù", "u").replace("ô", "o").replace("î", "i").replace("ï", "i").replace("à", "a").trim();
-    }
-
-    private static boolean dateLabelMatches(String normalized, Calendar date) {
-        String day = String.valueOf(date.get(Calendar.DAY_OF_MONTH));
-        String month = normalizeDate(new SimpleDateFormat("MMM", Locale.FRANCE).format(date.getTime()));
-        return normalized.contains(month) && java.util.regex.Pattern.compile("(?<![0-9])" + day + "(?![0-9])").matcher(normalized).find();
-    }
-
-    private static boolean sameDay(Calendar a, Calendar b) {
-        return a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR);
-    }
-
-    private static void zeroTime(Calendar c) {
-        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0);
-    }
-
-    private static String formatDate(Calendar c) { return new SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(c.getTime()); }
-
-    private void resetVerify(String taskId) { getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().remove("picker_verified_" + taskId).apply(); }
-    private void clearPickerState(String taskId) { resetVerify(taskId); }
-
-    private boolean clickScheduleControl(AccessibilityNodeInfo root) {
-        return clickFirst(root, "Programmer la publication", "Programmer", "Schedule post", "Schedule");
-    }
-
-    private static boolean scrollForward(AccessibilityNodeInfo root) {
-        if (root == null) return false;
-        if (root.isScrollable() && root.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) return true;
-        for (int i = 0; i < root.getChildCount(); i++) {
-            AccessibilityNodeInfo child = root.getChild(i);
-            if (child != null) {
-                boolean ok = scrollForward(child);
-                child.recycle();
-                if (ok) return true;
-            }
-        }
-        return false;
-    }
-
-    private void runGeneric(AccessibilityNodeInfo root, PublicationTask task) {
-        if (!isBotAwake()) return;
-        if (containsAny(root, "publié", "published", "upload complete")) { finish(task, "PUBLIÉ"); return; }
-        if (fillMetadata(root, task)) { mark(task, getState(task.id), "MÉTADONNÉES REMPLIES"); return; }
-        if (clickFirst(root, "Suivant", "Next", "Continuer", "Continue")) { mark(task, getState(task.id), "NAVIGATION EN COURS"); return; }
-        if (clickFirst(root, "Publier", "Post", "Mettre en ligne", "Upload")) mark(task, getState(task.id), "VALIDATION ENVOYÉE");
-    }
-
-    private boolean fillMetadata(AccessibilityNodeInfo root, PublicationTask task) {
-        List<AccessibilityNodeInfo> editable = new ArrayList<>();
-        collectEditable(root, editable);
-        if (editable.isEmpty()) return false;
-        String combined = PublicationAlarmReceiver.buildMetadata(task);
-        boolean changed = false;
-        try {
-            for (AccessibilityNodeInfo node : editable) {
-                if (!node.isEditable()) continue;
-                CharSequence current = node.getText();
-                if (current != null && current.length() > 0) continue;
-                String descriptor = descriptor(node);
-                String value = null;
-                if (descriptor.contains("title") || descriptor.contains("titre")) value = safe(task.title);
-                else if (descriptor.contains("description") || descriptor.contains("caption") || descriptor.contains("légende") || descriptor.contains("legende")) value = joined(task.description, task.hashtags);
-                else if (descriptor.contains("hashtag")) value = safe(task.hashtags);
-                else if (editable.size() == 1) value = combined;
-                if (!TextUtils.isEmpty(value) && setText(node, value)) changed = true;
-            }
-        } finally { recycle(editable); }
-        return changed;
-    }
-
-    private static void collectEditable(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
-        if (node == null) return;
-        if (node.isEditable()) out.add(AccessibilityNodeInfo.obtain(node));
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) { collectEditable(child, out); child.recycle(); }
-        }
-    }
-
-    private static void collectLabels(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
-        if (node == null) return;
-        if (node.getText() != null && node.getChildCount() == 0) out.add(AccessibilityNodeInfo.obtain(node));
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) { collectLabels(child, out); child.recycle(); }
-        }
-    }
-
-    private static String descriptor(AccessibilityNodeInfo node) {
-        StringBuilder b = new StringBuilder();
-        if (node.getViewIdResourceName() != null) b.append(node.getViewIdResourceName()).append(' ');
-        if (node.getContentDescription() != null) b.append(node.getContentDescription()).append(' ');
-        if (Build.VERSION.SDK_INT >= 26 && node.getHintText() != null) b.append(node.getHintText()).append(' ');
-        if (node.getText() != null) b.append(node.getText()).append(' ');
-        return b.toString().toLowerCase(Locale.ROOT);
-    }
-
-    private static boolean setText(AccessibilityNodeInfo node, String value) {
-        Bundle args = new Bundle();
-        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
-        return node.isEditable() && node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-    }
-
-    private static boolean clickFirst(AccessibilityNodeInfo root, String... labels) {
-        for (String label : labels) {
-            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
-            if (nodes == null) continue;
-            try { for (AccessibilityNodeInfo node : nodes) if (clickNode(node)) return true; }
-            finally { recycle(nodes); }
-        }
-        return false;
-    }
-
-    private static boolean clickNode(AccessibilityNodeInfo node) {
-        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
-        try {
-            while (current != null) {
-                if (current.isClickable() && current.isEnabled()) return current.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                AccessibilityNodeInfo parent = current.getParent();
-                current.recycle();
-                current = parent;
-            }
-            return false;
-        } finally { if (current != null) current.recycle(); }
-    }
-
-    private static boolean containsAny(AccessibilityNodeInfo root, String... labels) {
-        for (String label : labels) {
-            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
-            boolean found = nodes != null && !nodes.isEmpty();
-            recycle(nodes);
-            if (found) return true;
-        }
-        return false;
-    }
-
-    private boolean mark(PublicationTask task, String state, String status) {
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putString("state_" + task.id, state).apply();
-        task.status = status;
-        PublicationTaskRepository.save(this, task);
-        lastActionAt = System.currentTimeMillis();
-        return true;
-    }
-
-    private String getState(String taskId) { return getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("state_" + taskId, ""); }
-
-    private void finish(PublicationTask task, String status) {
-        task.status = status;
-        PublicationTaskRepository.save(this, task);
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().remove("active_task_id").remove("state_" + task.id)
-                .remove("picker_verified_" + task.id).remove("meta_ok_" + task.id).apply();
-        handler.removeCallbacks(retryRunnable);
-    }
-
-    private static boolean isTikTok(PublicationTask task) { return task.platform != null && task.platform.toLowerCase(Locale.ROOT).contains("tiktok"); }
-    private static String safe(String value) { return value == null ? "" : value.trim(); }
-    private static String joined(String a, String b) { String x = safe(a), y = safe(b); if (x.isEmpty()) return y; if (y.isEmpty()) return x; return x + "\n\n" + y; }
-    private static void recycle(List<AccessibilityNodeInfo> nodes) { if (nodes == null) return; for (AccessibilityNodeInfo node : nodes) if (node != null) node.recycle(); }
-
-    private static final class PickerLabel {
-        final String value; final float x; final int y; float spacing = 42f;
-        PickerLabel(String value, float x, int y) { this.value = value; this.x = x; this.y = y; }
-    }
-
-    private static final class PickerColumns {
-        final PickerLabel date, hour, minute;
-        PickerColumns(PickerLabel date, PickerLabel hour, PickerLabel minute, float ds, float hs, float ms) {
-            this.date = date; this.hour = hour; this.minute = minute;
-            if (date != null) date.spacing = ds; if (hour != null) hour.spacing = hs; if (minute != null) minute.spacing = ms;
-        }
-        boolean ready() { return date != null && hour != null && minute != null; }
-    }
-
-    @Override public void onInterrupt() {}
-    @Override public void onDestroy() { handler.removeCallbacksAndMessages(null); super.onDestroy(); }
+    L d=near(ds,y),h=near(hs,y),m=near(ms,y);
+    return new Cols(d,h,m,space(ds),space(hs),space(ms));
+  }
+  private static void sort(List<L> a){Collections.sort(a,new Comparator<L>(){public int compare(L x,L y){return x.y<y.y?-1:(x.y==y.y?0:1);}});}
+  private static L near(List<L>a,int y){if(a.isEmpty()||y<0)return null;L b=null;int bd=Integer.MAX_VALUE;for(L q:a){int d=Math.abs(q.y-y);if(d<bd){bd=d;b=q;}}return b;}
+  private static float space(List<L>a){if(a.size()<2)return 42f;sort(a);List<Integer>d=new ArrayList<>();for(int i=1;i<a.size();i++){int x=a.get(i).y-a.get(i-1).y;if(x>8)d.add(x);}if(d.isEmpty())return 42f;Collections.sort(d);return d.get(d.size()/2);}
+  private void gesture(L l,int direction,PublicationTask t,String what){
+    if(Build.VERSION.SDK_INT<24||l==null)return;
+    float den=getResources().getDisplayMetrics().density;
+    float dist=Math.max(16f*den,l.sp*.95f);dist=Math.min(dist,80f*den);
+    float a=l.y+(direction>0?dist*.55f:-dist*.55f),b=l.y+(direction>0?-dist*.55f:dist*.55f);
+    Path pth=new Path();pth.moveTo(l.x,a);pth.lineTo(l.x,b);
+    GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,340)).build();
+    boolean ok=dispatchGesture(g,new GestureResultCallback(){
+      @Override public void onCompleted(GestureDescription g){h.removeCallbacks(retry);h.postDelayed(retry,700);}
+      @Override public void onCancelled(GestureDescription g){h.removeCallbacks(retry);h.postDelayed(retry,700);}
+    },null);
+    lastActionAt=System.currentTimeMillis();mark(t,"TIKTOK_PICKER_GESTURE",ok?"TIKTOK — "+what:"TIKTOK — geste refusé "+what);
+  }
+  private void diag(PublicationTask t,Cols c,Calendar target){
+    String s="task="+t.id+"\nselectedDate="+c.d.v+"\nselectedHour="+c.h.v+"\nselectedMinute="+c.m.v+
+      "\ncenterY="+c.d.y+"\ntarget="+new SimpleDateFormat("dd/MM/yyyy HH:mm",Locale.FRANCE).format(target.getTime());
+    getSharedPreferences("superbot_diagnostic",MODE_PRIVATE).edit().putString("clock",s).apply();
+  }
+  private boolean swipeUp(){
+    if(Build.VERSION.SDK_INT<24)return false;android.util.DisplayMetrics d=getResources().getDisplayMetrics();
+    Path pth=new Path();pth.moveTo(d.widthPixels*.5f,d.heightPixels*.78f);pth.lineTo(d.widthPixels*.5f,d.heightPixels*.38f);
+    boolean ok=dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,420)).build(),null,null);
+    if(ok)lastActionAt=System.currentTimeMillis();return ok;
+  }
+  private static int dir(int c,int t,int mod){int f=(t-c+mod)%mod,b=(c-t+mod)%mod;return f<=b?1:-1;}
+  private static Integer num(String s){if(s==null)return null;String n=s.replaceAll("[^0-9]","");if(n.isEmpty())return null;try{return Integer.parseInt(n);}catch(Exception e){return null;}}
+  private static boolean dateLabel(String s){if(s==null)return false;String v=s.toLowerCase(Locale.FRANCE).replace("’","'");return v.contains("aujourd'hui")||v.contains("today")||v.matches(".*(janv|févr|fevr|mars|avr|mai|juin|juil|août|aout|sept|oct|nov|déc|dec).*\\d{1,2}.*");}
+  private Calendar parseDate(String s){
+    if(s==null)return null;String n=norm(s);Calendar today=Calendar.getInstance();zero(today);
+    if(n.contains("aujourd'hui")||n.contains("today"))return today;
+    for(int i=0;i<=31;i++){Calendar q=(Calendar)today.clone();q.add(Calendar.DAY_OF_YEAR,i);String day=""+q.get(Calendar.DAY_OF_MONTH);String mo=norm(new SimpleDateFormat("MMM",Locale.FRANCE).format(q.getTime()));if(n.contains(mo)&&java.util.regex.Pattern.compile("(?<![0-9])"+day+"(?![0-9])").matcher(n).find())return q;}
+    return null;
+  }
+  private static String norm(String s){return s.toLowerCase(Locale.FRANCE).replace(".","").replace("’","'").replace("é","e").replace("è","e").replace("ê","e").replace("û","u").replace("ù","u").replace("ô","o").replace("î","i").replace("ï","i").replace("à","a").trim();}
+  private static void zero(Calendar c){c.set(Calendar.HOUR_OF_DAY,0);c.set(Calendar.MINUTE,0);c.set(Calendar.SECOND,0);c.set(Calendar.MILLISECOND,0);}
+  private static boolean sameDay(Calendar a,Calendar b){return a.get(Calendar.YEAR)==b.get(Calendar.YEAR)&&a.get(Calendar.DAY_OF_YEAR)==b.get(Calendar.DAY_OF_YEAR);}
+  private static String fmtDate(Calendar c){return new SimpleDateFormat("dd/MM/yyyy",Locale.FRANCE).format(c.getTime());}
+  private void verifyReset(String id){p().edit().remove("picker_verified_"+id).apply();}
+  private void clearPicker(String id){p().edit().remove("picker_verified_"+id).remove("picker_center_y_"+id).apply();}
+  private boolean schedule(AccessibilityNodeInfo r){return click(r,"Programmer la publication","Programmer","Schedule post","Schedule");}
+  private static boolean scroll(AccessibilityNodeInfo r){
+    if(r==null)return false;if(r.isScrollable()&&r.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD))return true;
+    for(int i=0;i<r.getChildCount();i++){AccessibilityNodeInfo c=r.getChild(i);if(c!=null){boolean ok=scroll(c);c.recycle();if(ok)return true;}}return false;
+  }
+  private void generic(AccessibilityNodeInfo r,PublicationTask t){
+    if(has(r,"publié","published","upload complete")){finish(t,"PUBLIÉ");return;}
+    List<AccessibilityNodeInfo> fs=new ArrayList<>();editable(r,fs);
+    try{String all=PublicationAlarmReceiver.buildMetadata(t);for(AccessibilityNodeInfo f:fs)if(f.isEditable()&&(f.getText()==null||f.getText().length()==0)&&set(f,all)){mark(t,state(t.id),"MÉTADONNÉES REMPLIES");return;}}finally{recycle(fs);}
+    if(click(r,"Suivant","Next","Continuer","Continue"))mark(t,state(t.id),"NAVIGATION EN COURS");
+  }
+  private static void editable(AccessibilityNodeInfo n,List<AccessibilityNodeInfo>o){if(n==null)return;if(n.isEditable())o.add(AccessibilityNodeInfo.obtain(n));for(int i=0;i<n.getChildCount();i++){AccessibilityNodeInfo c=n.getChild(i);if(c!=null){editable(c,o);c.recycle();}}}
+  private static void labels(AccessibilityNodeInfo n,List<AccessibilityNodeInfo>o){if(n==null)return;if(n.getText()!=null&&n.getChildCount()==0)o.add(AccessibilityNodeInfo.obtain(n));for(int i=0;i<n.getChildCount();i++){AccessibilityNodeInfo c=n.getChild(i);if(c!=null){labels(c,o);c.recycle();}}}
+  private static String desc(AccessibilityNodeInfo n){StringBuilder b=new StringBuilder();if(n.getViewIdResourceName()!=null)b.append(n.getViewIdResourceName());if(n.getContentDescription()!=null)b.append(' ').append(n.getContentDescription());if(Build.VERSION.SDK_INT>=26&&n.getHintText()!=null)b.append(' ').append(n.getHintText());if(n.getText()!=null)b.append(' ').append(n.getText());return b.toString().toLowerCase(Locale.ROOT);}
+  private static boolean set(AccessibilityNodeInfo n,String v){Bundle b=new Bundle();b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,v);return n.isEditable()&&n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,b);}
+  private static boolean click(AccessibilityNodeInfo r,String...ls){for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns)if(clickNode(n))return true;}finally{recycle(ns);}}return false;}
+  private static boolean clickNode(AccessibilityNodeInfo n){AccessibilityNodeInfo c=AccessibilityNodeInfo.obtain(n);try{while(c!=null){if(c.isClickable()&&c.isEnabled())return c.performAction(AccessibilityNodeInfo.ACTION_CLICK);AccessibilityNodeInfo p=c.getParent();c.recycle();c=p;}return false;}finally{if(c!=null)c.recycle();}}
+  private static boolean has(AccessibilityNodeInfo r,String...ls){for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);boolean f=ns!=null&&!ns.isEmpty();recycle(ns);if(f)return true;}return false;}
+  private void mark(PublicationTask t,String s,String status){p().edit().putString("state_"+t.id,s).apply();t.status=status;PublicationTaskRepository.save(this,t);lastActionAt=System.currentTimeMillis();}
+  private String state(String id){return p().getString("state_"+id,"");}
+  private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);}
+  private static boolean isTikTok(PublicationTask t){return t.platform!=null&&t.platform.toLowerCase(Locale.ROOT).contains("tiktok");}
+  private static void recycle(List<AccessibilityNodeInfo>ns){if(ns!=null)for(AccessibilityNodeInfo n:ns)if(n!=null)n.recycle();}
+  private static final class L{final String v;final float x;final int y;float sp=42f;L(String v,float x,int y){this.v=v;this.x=x;this.y=y;}}
+  private static final class Cols{final L d,h,m;Cols(L d,L h,L m,float ds,float hs,float ms){this.d=d;this.h=h;this.m=m;if(d!=null)d.sp=ds;if(h!=null)h.sp=hs;if(m!=null)m.sp=ms;}boolean ok(){return d!=null&&h!=null&&m!=null;}}
+  @Override public void onInterrupt(){}
+  @Override public void onDestroy(){h.removeCallbacksAndMessages(null);super.onDestroy();}
 }
