@@ -14,7 +14,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
-import java.util.Date;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
@@ -33,12 +33,12 @@ public class BotAccessibilityService extends AccessibilityService {
         if (taskId.isEmpty()) return;
         PublicationTask task = PublicationTaskRepository.find(this, taskId);
         if (task == null) return;
-        String expectedPackage = PublicationAlarmReceiver.packageFor(task.platform);
-        if (expectedPackage == null || !expectedPackage.equals(event.getPackageName().toString())) return;
-        if (System.currentTimeMillis() - lastActionAt < 650L) return;
+        String expected = PublicationAlarmReceiver.packageFor(task.platform);
+        if (expected == null || !expected.equals(event.getPackageName().toString())) return;
+        if (System.currentTimeMillis() - lastActionAt < 500L) return;
         handler.removeCallbacks(retryRunnable);
         processTask(task);
-        handler.postDelayed(retryRunnable, 900L);
+        handler.postDelayed(retryRunnable, 850L);
     }
 
     private void processCurrentWindow() {
@@ -49,7 +49,7 @@ public class BotAccessibilityService extends AccessibilityService {
         if (task == null) return;
         processTask(task);
         handler.removeCallbacks(retryRunnable);
-        handler.postDelayed(retryRunnable, 900L);
+        handler.postDelayed(retryRunnable, 850L);
     }
 
     private void processTask(PublicationTask task) {
@@ -58,7 +58,7 @@ public class BotAccessibilityService extends AccessibilityService {
             retryCount = 0;
             clearPickerState(task.id);
         }
-        if (++retryCount > 240) {
+        if (++retryCount > 300) {
             mark(task, "TIKTOK_PAUSED", "TIKTOK — délai dépassé, vérifier l'écran");
             handler.removeCallbacks(retryRunnable);
             return;
@@ -148,9 +148,10 @@ public class BotAccessibilityService extends AccessibilityService {
                             .putBoolean("meta_ok_" + task.id, true).apply();
                     return true;
                 }
-                String d = descriptor(field);
-                if (!(d.contains("description") || d.contains("caption") || d.contains("légende")
-                        || d.contains("legende") || fields.size() == 1)) continue;
+                String descriptor = descriptor(field);
+                if (!(descriptor.contains("description") || descriptor.contains("caption")
+                        || descriptor.contains("légende") || descriptor.contains("legende")
+                        || fields.size() == 1)) continue;
                 field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
                 boolean ok = setText(field, expected);
                 if (!ok) {
@@ -174,183 +175,189 @@ public class BotAccessibilityService extends AccessibilityService {
         return false;
     }
 
+    /**
+     * TikTok dessine ses trois roues avec des vues qui ne sont pas toujours déclarées
+     * scrollables à AccessibilityService. On ne dépend donc plus de isScrollable().
+     * On lit les libellés visibles des trois colonnes et on envoie un vrai geste tactile
+     * dans la colonne concernée, comme le ferait le doigt de l'utilisateur.
+     */
     private void adjustTikTokPicker(AccessibilityNodeInfo root, PublicationTask task) {
+        if (Build.VERSION.SDK_INT < 24) {
+            mark(task, "TIKTOK_PAUSED", "TIKTOK — Android trop ancien pour piloter les roues");
+            return;
+        }
         if (task.scheduledAt <= System.currentTimeMillis() + 60000L) {
             mark(task, "TIKTOK_PAUSED", "TIKTOK — date programmée trop proche ou dépassée");
             return;
         }
 
-        List<AccessibilityNodeInfo> wheels = findPickerWheels(root);
-        try {
-            if (wheels.size() != 3) {
-                mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — les 3 roues ne sont pas encore accessibles");
-                return;
-            }
+        Rect screen = new Rect();
+        root.getBoundsInScreen(screen);
+        if (screen.width() <= 0 || screen.height() <= 0) return;
 
-            Calendar target = Calendar.getInstance();
-            target.setTimeInMillis(task.scheduledAt);
+        PickerColumns columns = readPickerColumns(root, screen);
+        if (!columns.ready()) {
+            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture visuelle des roues en cours");
+            return;
+        }
 
-            String dateText = centeredText(wheels.get(0));
-            Calendar currentDate = parseVisibleDate(dateText);
-            if (currentDate == null) {
-                mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture de la date en cours");
-                return;
-            }
-            if (!sameDay(currentDate, target)) {
-                int direction = target.after(currentDate) ? 1 : -1;
-                resetVerify(task.id);
-                boolean moved = swipeWheel(wheels.get(0), direction);
-                mark(task, "TIKTOK_PICKER_DATE", moved
-                        ? "TIKTOK — défilement de la date vers " + formatDate(target)
-                        : "TIKTOK — impossible de faire défiler la date");
-                return;
-            }
+        Calendar target = Calendar.getInstance();
+        target.setTimeInMillis(task.scheduledAt);
 
-            Integer currentHour = parseCenteredNumber(wheels.get(1));
-            if (currentHour == null) {
-                mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture de l'heure en cours");
-                return;
-            }
-            int targetHour = target.get(Calendar.HOUR_OF_DAY);
-            if (currentHour != targetHour) {
-                int direction = targetHour > currentHour ? 1 : -1;
-                resetVerify(task.id);
-                boolean moved = swipeWheel(wheels.get(1), direction);
-                mark(task, "TIKTOK_PICKER_HOUR", moved
-                        ? "TIKTOK — réglage de l'heure à " + String.format(Locale.FRANCE, "%02d", targetHour)
-                        : "TIKTOK — impossible de faire défiler l'heure");
-                return;
-            }
+        Calendar currentDate = parseVisibleDate(columns.date.value);
+        if (currentDate == null) {
+            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — date centrale non reconnue");
+            return;
+        }
+        if (!sameDay(currentDate, target)) {
+            int direction = target.after(currentDate) ? 1 : -1;
+            resetVerify(task.id);
+            dispatchWheelGesture(columns.date, direction, task,
+                    "date vers " + formatDate(target));
+            return;
+        }
 
-            Integer currentMinute = parseCenteredNumber(wheels.get(2));
-            if (currentMinute == null) {
-                mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture des minutes en cours");
-                return;
-            }
-            int targetMinute = target.get(Calendar.MINUTE);
-            if (currentMinute != targetMinute) {
-                int direction = targetMinute > currentMinute ? 1 : -1;
-                resetVerify(task.id);
-                boolean moved = swipeWheel(wheels.get(2), direction);
-                mark(task, "TIKTOK_PICKER_MINUTE", moved
-                        ? "TIKTOK — réglage des minutes à " + String.format(Locale.FRANCE, "%02d", targetMinute)
-                        : "TIKTOK — impossible de faire défiler les minutes");
-                return;
-            }
+        Integer currentHour = parseNumber(columns.hour.value);
+        if (currentHour == null) {
+            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — heure centrale non reconnue");
+            return;
+        }
+        int wantedHour = target.get(Calendar.HOUR_OF_DAY);
+        if (currentHour != wantedHour) {
+            int direction = shortestCircularDirection(currentHour, wantedHour, 24);
+            resetVerify(task.id);
+            dispatchWheelGesture(columns.hour, direction, task,
+                    "heure vers " + String.format(Locale.FRANCE, "%02d", wantedHour));
+            return;
+        }
 
-            int verified = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                    .getInt("picker_verified_" + task.id, 0) + 1;
-            getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                    .putInt("picker_verified_" + task.id, verified).apply();
-            if (verified < 2) {
-                mark(task, "TIKTOK_PICKER_VERIFY", "TIKTOK — contrôle final de la date et de l'heure");
-                return;
-            }
+        Integer currentMinute = parseNumber(columns.minute.value);
+        if (currentMinute == null) {
+            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — minutes centrales non reconnues");
+            return;
+        }
+        int wantedMinute = target.get(Calendar.MINUTE);
+        if (currentMinute != wantedMinute) {
+            int direction = shortestCircularDirection(currentMinute, wantedMinute, 60);
+            resetVerify(task.id);
+            dispatchWheelGesture(columns.minute, direction, task,
+                    "minutes vers " + String.format(Locale.FRANCE, "%02d", wantedMinute));
+            return;
+        }
 
-            if (clickFirst(root, "Terminé", "Done")) {
-                mark(task, "TIKTOK_SCHEDULE_READY", "TIKTOK — date et heure validées");
-            }
-        } finally {
-            recycle(wheels);
+        int verified = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .getInt("picker_verified_" + task.id, 0) + 1;
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
+                .putInt("picker_verified_" + task.id, verified).apply();
+        if (verified < 2) {
+            mark(task, "TIKTOK_PICKER_VERIFY", "TIKTOK — contrôle final date/heure");
+            return;
+        }
+        if (clickFirst(root, "Terminé", "Done")) {
+            mark(task, "TIKTOK_SCHEDULE_READY", "TIKTOK — date et heure validées");
         }
     }
 
-    private List<AccessibilityNodeInfo> findPickerWheels(AccessibilityNodeInfo root) {
-        List<AccessibilityNodeInfo> candidates = new ArrayList<>();
-        collectScrollable(root, candidates);
-        List<AccessibilityNodeInfo> leaves = new ArrayList<>();
-        for (AccessibilityNodeInfo node : candidates) {
-            Rect box = new Rect();
-            node.getBoundsInScreen(box);
-            if (!node.isVisibleToUser() || box.width() < 30 || box.height() < 80) continue;
-            boolean containsOther = false;
-            for (AccessibilityNodeInfo other : candidates) {
-                if (node == other) continue;
-                Rect child = new Rect();
-                other.getBoundsInScreen(child);
-                if (!box.equals(child) && box.contains(child)) {
-                    containsOther = true;
-                    break;
+    private PickerColumns readPickerColumns(AccessibilityNodeInfo root, Rect screen) {
+        List<AccessibilityNodeInfo> labels = new ArrayList<>();
+        collectLabels(root, labels);
+        List<PickerLabel> dates = new ArrayList<>();
+        List<PickerLabel> hours = new ArrayList<>();
+        List<PickerLabel> minutes = new ArrayList<>();
+        try {
+            for (AccessibilityNodeInfo node : labels) {
+                if (!node.isVisibleToUser() || node.getText() == null) continue;
+                String text = node.getText().toString().trim();
+                Rect b = new Rect();
+                node.getBoundsInScreen(b);
+                if (b.isEmpty()) continue;
+                float x = b.centerX() / (float) screen.width();
+                if (isDateLabel(text) && x < 0.55f) {
+                    dates.add(new PickerLabel(text, b.centerX(), b.centerY()));
+                } else if (text.matches("[0-9]{1,2}")) {
+                    if (x >= 0.43f && x < 0.72f) hours.add(new PickerLabel(text, b.centerX(), b.centerY()));
+                    else if (x >= 0.72f) minutes.add(new PickerLabel(text, b.centerX(), b.centerY()));
                 }
             }
-            if (!containsOther) leaves.add(AccessibilityNodeInfo.obtain(node));
+        } finally {
+            recycle(labels);
         }
-        recycle(candidates);
-        Collections.sort(leaves, (a, b) -> {
-            Rect x = new Rect();
-            Rect y = new Rect();
-            a.getBoundsInScreen(x);
-            b.getBoundsInScreen(y);
-            return Integer.compare(x.centerX(), y.centerX());
-        });
-        if (leaves.size() > 3) {
-            List<AccessibilityNodeInfo> three = new ArrayList<>();
-            for (int i = 0; i < 3; i++) three.add(AccessibilityNodeInfo.obtain(leaves.get(i)));
-            recycle(leaves);
-            return three;
-        }
-        return leaves;
+        return new PickerColumns(centerLabel(dates), centerLabel(hours), centerLabel(minutes),
+                spacing(dates), spacing(hours), spacing(minutes));
     }
 
-    private boolean swipeWheel(AccessibilityNodeInfo wheel, int direction) {
-        if (Build.VERSION.SDK_INT < 24) return false;
-        Rect box = new Rect();
-        wheel.getBoundsInScreen(box);
-        if (box.width() < 20 || box.height() < 60 || !wheel.isVisibleToUser()) return false;
+    private static PickerLabel centerLabel(List<PickerLabel> values) {
+        if (values.isEmpty()) return null;
+        Collections.sort(values, Comparator.comparingInt(a -> a.y));
+        return values.get(values.size() / 2);
+    }
 
-        float row = Math.max(28f * getResources().getDisplayMetrics().density, box.height() * 0.18f);
-        row = Math.min(row, box.height() * 0.32f);
-        float startY = box.centerY() + (direction > 0 ? row * 0.55f : -row * 0.55f);
-        float endY = box.centerY() + (direction > 0 ? -row * 0.55f : row * 0.55f);
+    private static float spacing(List<PickerLabel> values) {
+        if (values.size() < 2) return 42f;
+        Collections.sort(values, Comparator.comparingInt(a -> a.y));
+        List<Integer> diffs = new ArrayList<>();
+        for (int i = 1; i < values.size(); i++) {
+            int d = values.get(i).y - values.get(i - 1).y;
+            if (d > 8) diffs.add(d);
+        }
+        if (diffs.isEmpty()) return 42f;
+        Collections.sort(diffs);
+        return diffs.get(diffs.size() / 2);
+    }
+
+    private void dispatchWheelGesture(PickerLabel label, int direction, PublicationTask task, String what) {
+        float distance = Math.max(34f * getResources().getDisplayMetrics().density, label.spacing * 1.25f);
+        distance = Math.min(distance, 120f * getResources().getDisplayMetrics().density);
+        float startY = label.y + (direction > 0 ? distance * 0.55f : -distance * 0.55f);
+        float endY = label.y + (direction > 0 ? -distance * 0.55f : distance * 0.55f);
         Path path = new Path();
-        path.moveTo(box.centerX(), startY);
-        path.lineTo(box.centerX(), endY);
+        path.moveTo(label.x, startY);
+        path.lineTo(label.x, endY);
         GestureDescription gesture = new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, 360)).build();
-        boolean accepted = dispatchGesture(gesture, null, null);
-        lastActionAt = System.currentTimeMillis();
-        return accepted;
-    }
-
-    private static String centeredText(AccessibilityNodeInfo wheel) {
-        Rect wheelBox = new Rect();
-        wheel.getBoundsInScreen(wheelBox);
-        List<AccessibilityNodeInfo> labels = new ArrayList<>();
-        collectLabels(wheel, labels);
-        String best = "";
-        int bestDistance = Integer.MAX_VALUE;
-        for (AccessibilityNodeInfo node : labels) {
-            if (!node.isVisibleToUser() || node.getText() == null) continue;
-            Rect box = new Rect();
-            node.getBoundsInScreen(box);
-            int distance = Math.abs(box.centerY() - wheelBox.centerY());
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                best = node.getText().toString().trim();
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 480)).build();
+        boolean accepted = dispatchGesture(gesture, new GestureResultCallback() {
+            @Override public void onCompleted(GestureDescription gestureDescription) {
+                handler.removeCallbacks(retryRunnable);
+                handler.postDelayed(retryRunnable, 650L);
             }
-        }
-        recycle(labels);
-        return best;
+            @Override public void onCancelled(GestureDescription gestureDescription) {
+                handler.removeCallbacks(retryRunnable);
+                handler.postDelayed(retryRunnable, 650L);
+            }
+        }, null);
+        lastActionAt = System.currentTimeMillis();
+        mark(task, "TIKTOK_PICKER_GESTURE", accepted
+                ? "TIKTOK — défilement tactile " + what
+                : "TIKTOK — geste tactile refusé pour " + what);
     }
 
-    private static Integer parseCenteredNumber(AccessibilityNodeInfo wheel) {
-        String value = centeredText(wheel).replaceAll("[^0-9]", "");
-        if (value.isEmpty()) return null;
-        try {
-            return Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return null;
-        }
+    private static int shortestCircularDirection(int current, int target, int modulo) {
+        int forward = (target - current + modulo) % modulo;
+        int backward = (current - target + modulo) % modulo;
+        return forward <= backward ? 1 : -1;
+    }
+
+    private static Integer parseNumber(String value) {
+        if (value == null) return null;
+        String only = value.replaceAll("[^0-9]", "");
+        if (only.isEmpty()) return null;
+        try { return Integer.parseInt(only); }
+        catch (NumberFormatException e) { return null; }
+    }
+
+    private static boolean isDateLabel(String text) {
+        if (text == null) return false;
+        String v = text.toLowerCase(Locale.FRANCE).replace("’", "'");
+        if (v.contains("aujourd'hui") || v.contains("today")) return true;
+        return v.matches(".*(janv|févr|fevr|mars|avr|mai|juin|juil|août|aout|sept|oct|nov|déc|dec).*\\d{1,2}.*");
     }
 
     private Calendar parseVisibleDate(String text) {
         if (text == null) return null;
-        String normalized = text.toLowerCase(Locale.FRANCE)
-                .replace(".", "").replace("’", "'").trim();
+        String normalized = normalizeDate(text);
         Calendar today = Calendar.getInstance();
         zeroTime(today);
         if (normalized.contains("aujourd'hui") || normalized.contains("today")) return today;
-
         for (int offset = 0; offset <= 31; offset++) {
             Calendar probe = (Calendar) today.clone();
             probe.add(Calendar.DAY_OF_YEAR, offset);
@@ -359,10 +366,17 @@ public class BotAccessibilityService extends AccessibilityService {
         return null;
     }
 
+    private static String normalizeDate(String text) {
+        return text.toLowerCase(Locale.FRANCE).replace(".", "").replace("’", "'")
+                .replace("é", "e").replace("è", "e").replace("ê", "e")
+                .replace("û", "u").replace("ù", "u").replace("ô", "o")
+                .replace("î", "i").replace("ï", "i").replace("à", "a").trim();
+    }
+
     private static boolean dateLabelMatches(String normalized, Calendar date) {
         String day = String.valueOf(date.get(Calendar.DAY_OF_MONTH));
-        String month = new SimpleDateFormat("MMM", Locale.FRANCE).format(date.getTime())
-                .toLowerCase(Locale.FRANCE).replace(".", "");
+        String month = new SimpleDateFormat("MMM", Locale.FRANCE).format(date.getTime());
+        month = normalizeDate(month);
         return normalized.contains(month)
                 && java.util.regex.Pattern.compile("(?<![0-9])" + day + "(?![0-9])")
                 .matcher(normalized).find();
@@ -440,12 +454,13 @@ public class BotAccessibilityService extends AccessibilityService {
                 if (!node.isEditable()) continue;
                 CharSequence current = node.getText();
                 if (current != null && current.length() > 0) continue;
-                String d = descriptor(node);
+                String descriptor = descriptor(node);
                 String value = null;
-                if (d.contains("title") || d.contains("titre")) value = safe(task.title);
-                else if (d.contains("description") || d.contains("caption") || d.contains("légende")
-                        || d.contains("legende")) value = joined(task.description, task.hashtags);
-                else if (d.contains("hashtag")) value = safe(task.hashtags);
+                if (descriptor.contains("title") || descriptor.contains("titre")) value = safe(task.title);
+                else if (descriptor.contains("description") || descriptor.contains("caption")
+                        || descriptor.contains("légende") || descriptor.contains("legende"))
+                    value = joined(task.description, task.hashtags);
+                else if (descriptor.contains("hashtag")) value = safe(task.hashtags);
                 else if (editable.size() == 1) value = combined;
                 if (!TextUtils.isEmpty(value) && setText(node, value)) changed = true;
             }
@@ -467,27 +482,9 @@ public class BotAccessibilityService extends AccessibilityService {
         }
     }
 
-    private static void collectScrollable(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
-        if (node == null) return;
-        CharSequence cls = node.getClassName();
-        String className = cls == null ? "" : cls.toString();
-        if (node.isScrollable() || className.contains("NumberPicker")) {
-            out.add(AccessibilityNodeInfo.obtain(node));
-        }
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) {
-                collectScrollable(child, out);
-                child.recycle();
-            }
-        }
-    }
-
     private static void collectLabels(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
         if (node == null) return;
-        if (node.getText() != null && node.getChildCount() == 0) {
-            out.add(AccessibilityNodeInfo.obtain(node));
-        }
+        if (node.getText() != null && node.getChildCount() == 0) out.add(AccessibilityNodeInfo.obtain(node));
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
@@ -517,9 +514,7 @@ public class BotAccessibilityService extends AccessibilityService {
             List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
             if (nodes == null) continue;
             try {
-                for (AccessibilityNodeInfo node : nodes) {
-                    if (clickNode(node)) return true;
-                }
+                for (AccessibilityNodeInfo node : nodes) if (clickNode(node)) return true;
             } finally {
                 recycle(nodes);
             }
@@ -531,9 +526,7 @@ public class BotAccessibilityService extends AccessibilityService {
         AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
         try {
             while (current != null) {
-                if (current.isClickable() && current.isEnabled()) {
-                    return current.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                }
+                if (current.isClickable() && current.isEnabled()) return current.performAction(AccessibilityNodeInfo.ACTION_CLICK);
                 AccessibilityNodeInfo parent = current.getParent();
                 current.recycle();
                 current = parent;
@@ -572,11 +565,8 @@ public class BotAccessibilityService extends AccessibilityService {
         task.status = status;
         PublicationTaskRepository.save(this, task);
         getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                .remove("active_task_id")
-                .remove("state_" + task.id)
-                .remove("picker_verified_" + task.id)
-                .remove("meta_ok_" + task.id)
-                .apply();
+                .remove("active_task_id").remove("state_" + task.id)
+                .remove("picker_verified_" + task.id).remove("meta_ok_" + task.id).apply();
         handler.removeCallbacks(retryRunnable);
     }
 
@@ -584,13 +574,10 @@ public class BotAccessibilityService extends AccessibilityService {
         return task.platform != null && task.platform.toLowerCase(Locale.ROOT).contains("tiktok");
     }
 
-    private static String safe(String value) {
-        return value == null ? "" : value.trim();
-    }
+    private static String safe(String value) { return value == null ? "" : value.trim(); }
 
     private static String joined(String a, String b) {
-        String x = safe(a);
-        String y = safe(b);
+        String x = safe(a), y = safe(b);
         if (x.isEmpty()) return y;
         if (y.isEmpty()) return x;
         return x + "\n\n" + y;
@@ -598,13 +585,34 @@ public class BotAccessibilityService extends AccessibilityService {
 
     private static void recycle(List<AccessibilityNodeInfo> nodes) {
         if (nodes == null) return;
-        for (AccessibilityNodeInfo node : nodes) {
-            if (node != null) node.recycle();
-        }
+        for (AccessibilityNodeInfo node : nodes) if (node != null) node.recycle();
     }
 
-    @Override
-    public void onInterrupt() {}
+    private static final class PickerLabel {
+        final String value;
+        final float x;
+        final int y;
+        float spacing = 42f;
+        PickerLabel(String value, float x, int y) { this.value = value; this.x = x; this.y = y; }
+    }
+
+    private static final class PickerColumns {
+        final PickerLabel date;
+        final PickerLabel hour;
+        final PickerLabel minute;
+        PickerColumns(PickerLabel date, PickerLabel hour, PickerLabel minute,
+                      float dateSpacing, float hourSpacing, float minuteSpacing) {
+            this.date = date;
+            this.hour = hour;
+            this.minute = minute;
+            if (date != null) date.spacing = dateSpacing;
+            if (hour != null) hour.spacing = hourSpacing;
+            if (minute != null) minute.spacing = minuteSpacing;
+        }
+        boolean ready() { return date != null && hour != null && minute != null; }
+    }
+
+    @Override public void onInterrupt() {}
 
     @Override
     public void onDestroy() {
