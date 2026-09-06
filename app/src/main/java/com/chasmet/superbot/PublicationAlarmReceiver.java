@@ -44,7 +44,7 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
         }
 
         File video = new File(task.videoPath == null ? "" : task.videoPath);
-        if (!video.exists()) {
+        if (!video.exists() || !video.isFile()) {
             task.status = "ERREUR • vidéo introuvable";
             PublicationTaskRepository.save(context, task);
             return false;
@@ -61,35 +61,44 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
 
         try {
             Uri uri = FileProvider.getUriForFile(context, context.getPackageName() + ".files", video);
-            Intent share = new Intent(Intent.ACTION_SEND);
-            share.setType("video/mp4");
-            share.putExtra(Intent.EXTRA_STREAM, uri);
-            share.putExtra(Intent.EXTRA_TEXT, metadata);
-            share.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-
             String[] packages = packagesFor(task.platform);
+            if (packages == null || packages.length == 0) {
+                throw new IllegalStateException("plateforme sans package cible");
+            }
+
             Exception last = null;
-            if (packages != null) {
-                for (String pkg : packages) {
-                    if (!isInstalled(context, pkg)) continue;
-                    try {
-                        share.setPackage(pkg);
-                        context.startActivity(share);
-                        task.status = "BOT OUVERT • " + pkg;
-                        PublicationTaskRepository.save(context, task);
-                        return true;
-                    } catch (Exception e) {
-                        last = e;
-                    }
+            for (String pkg : packages) {
+                try {
+                    Intent share = new Intent(Intent.ACTION_SEND);
+                    share.setType("video/mp4");
+                    share.putExtra(Intent.EXTRA_STREAM, uri);
+                    share.putExtra(Intent.EXTRA_TEXT, metadata);
+                    share.setClipData(ClipData.newRawUri("Super Bot video", uri));
+                    share.setPackage(pkg);
+                    share.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    context.startActivity(share);
+                    task.status = "BOT OUVERT • " + pkg;
+                    PublicationTaskRepository.save(context, task);
+                    return true;
+                } catch (Exception e) {
+                    last = e;
                 }
             }
+
             if (last != null) throw last;
-            throw new IllegalStateException("application cible non installée");
+            throw new IllegalStateException("application cible indisponible");
         } catch (Exception error) {
-            task.status = "ERREUR • application indisponible";
+            String detail = error.getClass().getSimpleName();
+            if (error.getMessage() != null && !error.getMessage().trim().isEmpty()) {
+                detail += " • " + error.getMessage().trim();
+            }
+            task.status = "ERREUR DISPATCH • " + detail;
             PublicationTaskRepository.save(context, task);
             context.getSharedPreferences("superbot_bot_state", Context.MODE_PRIVATE)
-                    .edit().remove("active_task_id").apply();
+                    .edit()
+                    .remove("active_task_id")
+                    .putString("last_dispatch_error", detail)
+                    .apply();
             return false;
         }
     }
@@ -108,15 +117,6 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
             case "YouTube classique": return new String[]{"com.google.android.youtube"};
             case "X": return new String[]{"com.twitter.android", "com.x.android"};
             default: return null;
-        }
-    }
-
-    private static boolean isInstalled(Context context, String pkg) {
-        try {
-            context.getPackageManager().getPackageInfo(pkg, 0);
-            return true;
-        } catch (Exception ignored) {
-            return false;
         }
     }
 
