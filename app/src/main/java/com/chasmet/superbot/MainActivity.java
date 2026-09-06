@@ -11,6 +11,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        McpConnectionService.start(this);
         setContentView(R.layout.activity_main);
 
         findViewById(R.id.cardStudio).setOnClickListener(v -> startActivity(new Intent(this, VideoStudioActivity.class)));
@@ -25,10 +26,16 @@ public class MainActivity extends Activity {
         if (settings != null) settings.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        McpConnectionService.start(this);
+    }
+
     private void bindBot(int id, String name) {
         View view = findViewById(id);
         if (view == null) return;
         view.setOnClickListener(v -> {
+            McpConnectionService.start(this);
             Toast.makeText(this, name + " utilise le service d'automatisation Android", Toast.LENGTH_LONG).show();
             try {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
