@@ -53,10 +53,7 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
         task.status = "TRANSMIS AU BOT • " + task.platform;
         PublicationTaskRepository.save(context, task);
         context.getSharedPreferences("superbot_bot_state", Context.MODE_PRIVATE)
-                .edit()
-                .putString("active_task_id", task.id)
-                .remove("state_" + task.id)
-                .apply();
+                .edit().putString("active_task_id", task.id).remove("state_" + task.id).apply();
 
         String metadata = buildMetadata(task);
         ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
@@ -69,10 +66,25 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
             share.putExtra(Intent.EXTRA_STREAM, uri);
             share.putExtra(Intent.EXTRA_TEXT, metadata);
             share.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            String pkg = packageFor(task.platform);
-            if (pkg != null) share.setPackage(pkg);
-            context.startActivity(share);
-            return true;
+
+            String[] packages = packagesFor(task.platform);
+            Exception last = null;
+            if (packages != null) {
+                for (String pkg : packages) {
+                    if (!isInstalled(context, pkg)) continue;
+                    try {
+                        share.setPackage(pkg);
+                        context.startActivity(share);
+                        task.status = "BOT OUVERT • " + pkg;
+                        PublicationTaskRepository.save(context, task);
+                        return true;
+                    } catch (Exception e) {
+                        last = e;
+                    }
+                }
+            }
+            if (last != null) throw last;
+            throw new IllegalStateException("application cible non installée");
         } catch (Exception error) {
             task.status = "ERREUR • application indisponible";
             PublicationTaskRepository.save(context, task);
@@ -83,13 +95,28 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
     }
 
     static String packageFor(String platform) {
+        String[] packages = packagesFor(platform);
+        return packages == null || packages.length == 0 ? null : packages[0];
+    }
+
+    static String[] packagesFor(String platform) {
         if (platform == null) return null;
         switch (platform) {
-            case "TikTok": return "com.zhiliaoapp.musically";
-            case "Instagram": return "com.instagram.android";
+            case "TikTok": return new String[]{"com.zhiliaoapp.musically", "com.ss.android.ugc.trill"};
+            case "Instagram": return new String[]{"com.instagram.android"};
             case "YouTube Shorts":
-            case "YouTube classique": return "com.google.android.youtube";
+            case "YouTube classique": return new String[]{"com.google.android.youtube"};
+            case "X": return new String[]{"com.twitter.android", "com.x.android"};
             default: return null;
+        }
+    }
+
+    private static boolean isInstalled(Context context, String pkg) {
+        try {
+            context.getPackageManager().getPackageInfo(pkg, 0);
+            return true;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
