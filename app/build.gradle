@@ -10,8 +10,8 @@ android {
         applicationId 'com.chasmet.superbot'
         minSdk 21
         targetSdk 34
-        versionCode 26
-        versionName '1.3.13'
+        versionCode 27
+        versionName '1.3.14'
     }
 
     signingConfigs {
@@ -75,10 +75,13 @@ tasks.named('preBuild').configure {
                 'private static boolean click(AccessibilityNodeInfo r,String...ls){',
                 'private boolean tapText(AccessibilityNodeInfo r,String...ls){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}\n  private static boolean click(AccessibilityNodeInfo r,String...ls){')
 
-        // Pont MCP : le serveur Render lit l'écran et envoie click/swipe/back au service Accessibility.
+        // Pont MCP : démarrage à la connexion du service ET secours au premier événement Accessibility.
         text = text.replace(
                 'public class BotAccessibilityService extends AccessibilityService {',
-                'public class BotAccessibilityService extends AccessibilityService {\n  private SuperBotRemoteBridge remoteBridge;\n  @Override protected void onServiceConnected(){super.onServiceConnected();if(remoteBridge==null){remoteBridge=new SuperBotRemoteBridge(this);remoteBridge.start();}}')
+                'public class BotAccessibilityService extends AccessibilityService {\n  private SuperBotRemoteBridge remoteBridge;\n  private void ensureRemoteBridge(){if(remoteBridge==null){remoteBridge=new SuperBotRemoteBridge(this);remoteBridge.start();}}\n  @Override protected void onServiceConnected(){super.onServiceConnected();ensureRemoteBridge();}')
+        text = text.replace(
+                '@Override public void onAccessibilityEvent(AccessibilityEvent e){',
+                '@Override public void onAccessibilityEvent(AccessibilityEvent e){\n    ensureRemoteBridge();')
         text = text.replace(
                 '@Override public void onDestroy(){h.removeCallbacksAndMessages(null);super.onDestroy();}',
                 '@Override public void onDestroy(){if(remoteBridge!=null){remoteBridge.stop();remoteBridge=null;}h.removeCallbacksAndMessages(null);super.onDestroy();}')
