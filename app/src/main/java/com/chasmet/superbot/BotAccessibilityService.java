@@ -15,6 +15,8 @@ import java.util.Locale;
 
 public class BotAccessibilityService extends AccessibilityService {
     private long lastActionAt = 0L;
+    private final String[] previousWheelValues = new String[3];
+    private final int[] unchangedWheelReads = new int[3];
     private final android.os.Handler retryHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private int retryCount;
     private String retryTask = "";
@@ -23,7 +25,7 @@ public class BotAccessibilityService extends AccessibilityService {
     private void processWindow() {
         String id = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("active_task_id", "");
         PublicationTask task = PublicationTaskRepository.find(this, id);
-        if (!id.equals(retryTask)) { retryTask = id; retryCount = 0; }
+        if (!id.equals(retryTask)) { retryTask = id; retryCount = 0; java.util.Arrays.fill(previousWheelValues, null); java.util.Arrays.fill(unchangedWheelReads, 0); }
         if (task == null || !isTikTok(task) || getState(id).equals("TIKTOK_PAUSED")) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
@@ -197,9 +199,46 @@ public class BotAccessibilityService extends AccessibilityService {
                 .addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 300)).build(), null, null);
     }
 
+    private void appendDiagnostic(String line) {
+        android.content.SharedPreferences prefs = getSharedPreferences("superbot_diagnostic", MODE_PRIVATE);
+        String previous = prefs.getString("clock", "");
+        String next = previous + "\n" + System.currentTimeMillis() + " " + line;
+        if (next.length() > 48000) next = next.substring(next.length() - 48000);
+        prefs.edit().putString("clock", next).apply();
+    }
+
+    private void recordPicker(AccessibilityNodeInfo root, PublicationTask task, List<AccessibilityNodeInfo> wheels) {
+        StringBuilder report = new StringBuilder("version=").append(AppUpdateManager.installedVersion(this))
+                .append(" state=").append(getState(task.id)).append(" target=").append(task.scheduledAt)
+                .append(" zone=").append(java.util.TimeZone.getDefault().getID())
+                .append(" candidates=").append(wheels.size());
+        for (AccessibilityNodeInfo wheel : wheels) {
+            android.graphics.Rect box = new android.graphics.Rect(); wheel.getBoundsInScreen(box);
+            report.append("\nwheel class=").append(wheel.getClassName()).append(" bounds=").append(box)
+                    .append(" scroll=").append(wheel.isScrollable()).append(" visible=").append(wheel.isVisibleToUser())
+                    .append(" actions=").append(wheel.getActions());
+        }
+        List<AccessibilityNodeInfo> labels = new ArrayList<>(); collectLabels(root, labels);
+        int count = 0;
+        for (AccessibilityNodeInfo node : labels) {
+            String value = node.getText().toString().trim();
+            // Only date/time labels, never captions or account information.
+            if (value.matches("[0-9]{1,2}") || value.equalsIgnoreCase("Aujourd'hui")
+                    || value.matches("(?i)(janv|févr|mars|avr|mai|juin|juil|août|sept|oct|nov|déc)\\.? [0-9]{1,2}.*")) {
+                android.graphics.Rect box = new android.graphics.Rect(); node.getBoundsInScreen(box);
+                report.append("\nlabel=").append(value).append(" bounds=").append(box)
+                        .append(" selected=").append(node.isSelected()).append(" visible=").append(node.isVisibleToUser());
+                if (++count >= 80) break;
+            }
+        }
+        recycle(labels);
+        appendDiagnostic(report.toString());
+    }
+
     private boolean adjustPicker(AccessibilityNodeInfo root, PublicationTask task) {
         List<AccessibilityNodeInfo> all = new ArrayList<>();
         collectScrollable(root, all);
+        recordPicker(root, task, all);
         List<AccessibilityNodeInfo> wheels = new ArrayList<>();
         for (AccessibilityNodeInfo node : all) {
             android.graphics.Rect box = new android.graphics.Rect();
@@ -231,6 +270,8 @@ public class BotAccessibilityService extends AccessibilityService {
                 return mark(task, "TIKTOK_PAUSED", "TIKTOK — date hors de la plage prise en charge");
             for (int i = 0; i < 3; i++) {
                 String value = centeredText(wheels.get(i));
+                unchangedWheelReads[i] = value.equals(previousWheelValues[i]) ? unchangedWheelReads[i] + 1 : 0;
+                previousWheelValues[i] = value;
                 boolean matches;
                 int direction = 1;
                 if (i == 0) {
@@ -256,9 +297,18 @@ public class BotAccessibilityService extends AccessibilityService {
                     direction = Integer.compare(wanted, current);
                 }
                 if (!matches) {
-                    boolean moved = wheels.get(i).performAction(direction >= 0
-                            ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
-                    if (!moved) moved = swipeWheel(wheels.get(i), direction);
+                    boolean moved;
+                    boolean gesture = unchangedWheelReads[i] >= 2;
+                    if (gesture) {
+                        moved = swipeWheel(wheels.get(i), direction);
+                        unchangedWheelReads[i] = 0;
+                    } else {
+                        moved = wheels.get(i).performAction(direction >= 0
+                                ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+                        if (!moved) { gesture = true; moved = swipeWheel(wheels.get(i), direction); }
+                    }
+                    appendDiagnostic("wheel=" + i + " center=" + value + " direction=" + direction
+                            + " gesture=" + gesture + " accepted=" + moved);
                     return mark(task, "TIKTOK_PICKER_ADJUST", moved ? "TIKTOK — réglage des roues en cours"
                             : "TIKTOK — roue inaccessible, vérifier l'écran");
                 }

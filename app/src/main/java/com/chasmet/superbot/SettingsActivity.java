@@ -41,6 +41,10 @@ public class SettingsActivity extends Activity {
             installerLaunched = savedInstanceState.getBoolean("update_installer");
         }
         currentVersion.setText("Version installée : " + AppUpdateManager.installedVersion(this));
+        android.widget.Button diagnostic = new android.widget.Button(this);
+        diagnostic.setText("Partager le diagnostic de l'horloge");
+        ((android.view.ViewGroup) currentVersion.getParent()).addView(diagnostic);
+        diagnostic.setOnClickListener(v -> shareClockDiagnostic());
 
         findViewById(R.id.rowAutomation).setOnClickListener(v -> {
             try { startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)); }
@@ -103,6 +107,26 @@ public class SettingsActivity extends Activity {
             latestVersion.setText(result == RESULT_OK ? "Mise à jour installée"
                     : "Installation annulée ou refusée par Android. Tu peux réessayer.");
         }
+    }
+
+    private void shareClockDiagnostic() {
+        String report = getSharedPreferences("superbot_diagnostic", MODE_PRIVATE).getString("clock", "");
+        if (report.isEmpty()) { toast("Relance une programmation jusqu'à l'horloge, puis reviens ici."); return; }
+        try {
+            File dir = new File(getCacheDir(), "updates");
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new java.io.IOException("Dossier inaccessible");
+            File file = new File(dir, "superbot-horloge.txt");
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(file)) {
+                out.write(report.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(this, getPackageName() + ".files", file);
+            Intent share = new Intent(Intent.ACTION_SEND);
+            share.setType("text/plain");
+            share.putExtra(Intent.EXTRA_STREAM, uri);
+            share.setClipData(android.content.ClipData.newRawUri("Diagnostic horloge", uri));
+            share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(share, "Partager le diagnostic de l'horloge"));
+        } catch (Exception e) { toast("Diagnostic : " + e.getMessage()); }
     }
 
     private void refreshAutomationStatus() {
