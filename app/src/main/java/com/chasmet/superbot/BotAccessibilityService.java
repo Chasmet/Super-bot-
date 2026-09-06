@@ -1,6 +1,9 @@
 package com.chasmet.superbot;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
+import android.graphics.Path;
+import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.TextUtils;
@@ -9,146 +12,129 @@ import android.view.accessibility.AccessibilityNodeInfo;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
 public class BotAccessibilityService extends AccessibilityService {
-    private long lastActionAt = 0L;
-    private final String[] previousWheelValues = new String[3];
-    private final int[] unchangedWheelReads = new int[3];
-    private final android.os.Handler retryHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private long lastActionAt;
+    private final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable retryRunnable = this::processCurrentWindow;
+    private String activeTask = "";
     private int retryCount;
-    private String retryTask = "";
-    private final Runnable retry = () -> processWindow();
 
-    private void processWindow() {
-        String id = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("active_task_id", "");
-        PublicationTask task = PublicationTaskRepository.find(this, id);
-        if (!id.equals(retryTask)) { retryTask = id; retryCount = 0; java.util.Arrays.fill(previousWheelValues, null); java.util.Arrays.fill(unchangedWheelReads, 0); }
-        if (task == null || !isTikTok(task) || getState(id).equals("TIKTOK_PAUSED")) return;
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
-        try {
-            if (!PublicationAlarmReceiver.packageFor(task.platform).contentEquals(
-                    root.getPackageName() == null ? "" : root.getPackageName())) return;
-            if (++retryCount > 180) {
-                mark(task, "TIKTOK_PAUSED", "TIKTOK — délai dépassé, vérifier la programmation");
-                return;
-            }
-            runTikTok(root, task);
-            retryHandler.removeCallbacks(retry);
-            retryHandler.postDelayed(retry, 1100);
-        } finally { root.recycle(); }
-    }
-
-    @Override public void onDestroy() {
-        retryHandler.removeCallbacksAndMessages(null);
-        super.onDestroy();
-    }
-
-    @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+    @Override
+    public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null || event.getPackageName() == null) return;
-        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("active_task_id", "");
+        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .getString("active_task_id", "");
         if (taskId.isEmpty()) return;
         PublicationTask task = PublicationTaskRepository.find(this, taskId);
         if (task == null) return;
-        String expected = PublicationAlarmReceiver.packageFor(task.platform);
-        String current = event.getPackageName().toString();
-        if (expected == null || !expected.equals(current)) return;
-        if (System.currentTimeMillis() - lastActionAt < 850L) return;
+        String expectedPackage = PublicationAlarmReceiver.packageFor(task.platform);
+        if (expectedPackage == null || !expectedPackage.equals(event.getPackageName().toString())) return;
+        if (System.currentTimeMillis() - lastActionAt < 650L) return;
+        handler.removeCallbacks(retryRunnable);
+        processTask(task);
+        handler.postDelayed(retryRunnable, 900L);
+    }
 
+    private void processCurrentWindow() {
+        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .getString("active_task_id", "");
+        if (taskId.isEmpty()) return;
+        PublicationTask task = PublicationTaskRepository.find(this, taskId);
+        if (task == null) return;
+        processTask(task);
+        handler.removeCallbacks(retryRunnable);
+        handler.postDelayed(retryRunnable, 900L);
+    }
+
+    private void processTask(PublicationTask task) {
+        if (!task.id.equals(activeTask)) {
+            activeTask = task.id;
+            retryCount = 0;
+            clearPickerState(task.id);
+        }
+        if (++retryCount > 240) {
+            mark(task, "TIKTOK_PAUSED", "TIKTOK — délai dépassé, vérifier l'écran");
+            handler.removeCallbacks(retryRunnable);
+            return;
+        }
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
         try {
-            if (isTikTok(task)) {
-                if (getState(task.id).equals("TIKTOK_PAUSED")) return;
-                retryHandler.removeCallbacks(retry);
-                retryHandler.postDelayed(retry, 1100);
-                runTikTok(root, task);
-                return;
-            }
-            runGeneric(root, task);
+            CharSequence pkg = root.getPackageName();
+            String expected = PublicationAlarmReceiver.packageFor(task.platform);
+            if (pkg == null || expected == null || !expected.equals(pkg.toString())) return;
+            if (isTikTok(task)) runTikTok(root, task);
+            else runGeneric(root, task);
         } finally {
             root.recycle();
         }
     }
 
-    private boolean runTikTok(AccessibilityNodeInfo root, PublicationTask task) {
+    private void runTikTok(AccessibilityNodeInfo root, PublicationTask task) {
         String state = getState(task.id);
+        if ("TIKTOK_PAUSED".equals(state)) return;
 
-        if (state.equals("TIKTOK_CONFIRMING") && containsAny(root, "publication programmée", "post scheduled")) {
+        if ("TIKTOK_CONFIRMING".equals(state)
+                && containsAny(root, "publication programmée", "post scheduled", "scheduled")) {
             finish(task, "PROGRAMMÉ");
-            return true;
-        }
-        if (containsAny(root, "publié", "published", "mise en ligne terminée", "upload complete")) {
-            finish(task, "PUBLIÉ");
-            return true;
-        }
-
-        if (!getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getBoolean("meta_ok_" + task.id, false)) {
-            if (containsAny(root, "Date et heure de publication", "Date and time of publication")
-                    || state.equals("TIKTOK_MORE_OPTIONS") || state.equals("TIKTOK_MORE_OPTIONS_SCROLL")) {
-                performGlobalAction(GLOBAL_ACTION_BACK);
-                return mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — retour au texte de publication");
-            }
-            if (!ensureTikTokMetadata(root, task)) return true;
-            return mark(task, "TIKTOK_METADATA", "TIKTOK — titre, description et hashtags vérifiés");
+            return;
         }
 
         if (containsAny(root, "Date et heure de publication", "Date and time of publication")) {
-            return adjustPicker(root, task);
+            adjustTikTokPicker(root, task);
+            return;
         }
 
-        boolean future = task.scheduledAt > System.currentTimeMillis() + 60000L;
-        if (!future) return false;
-
-        if (!state.startsWith("TIKTOK_") && fillMetadata(root, task)) {
-            return mark(task, "TIKTOK_METADATA", "TIKTOK — MÉTADONNÉES REMPLIES");
+        if (!getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .getBoolean("meta_ok_" + task.id, false)) {
+            if (!ensureTikTokMetadata(root, task)) return;
+            mark(task, "TIKTOK_METADATA", "TIKTOK — métadonnées vérifiées");
+            return;
         }
 
-        if ((state.isEmpty() || state.equals("TIKTOK_METADATA"))
-                && containsAny(root, "plus d’options", "plus d'options", "more options")) {
-            if (clickFirst(root, "plus d’options", "plus d'options", "more options")) {
-                return mark(task, "TIKTOK_MORE_OPTIONS", "TIKTOK — PLUS D'OPTIONS");
+        if (containsAny(root, "Plus d’options", "Plus d'options", "More options")) {
+            if (clickFirst(root, "Plus d’options", "Plus d'options", "More options")) {
+                mark(task, "TIKTOK_MORE_OPTIONS", "TIKTOK — Plus d'options ouvert");
+                return;
             }
         }
 
-        if (state.equals("TIKTOK_MORE_OPTIONS") || state.equals("TIKTOK_MORE_OPTIONS_SCROLL")) {
+        if ("TIKTOK_MORE_OPTIONS".equals(state) || "TIKTOK_MORE_OPTIONS_SCROLL".equals(state)
+                || containsAny(root, "Programmer la publication", "Schedule post")) {
             if (clickScheduleControl(root)) {
-                clearPickerAttempts(task.id);
-                return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
+                clearPickerState(task.id);
+                mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — programmation ouverte");
+                return;
             }
             if (scrollForward(root)) {
-                return mark(task, "TIKTOK_MORE_OPTIONS_SCROLL", "TIKTOK — RECHERCHE DE PROGRAMMER LA PUBLICATION");
+                mark(task, "TIKTOK_MORE_OPTIONS_SCROLL", "TIKTOK — recherche de Programmer la publication");
+                return;
             }
         }
 
-        if (!state.startsWith("TIKTOK_PICKER_")
-                && !state.equals("TIKTOK_SCHEDULE_READY")
-                && !state.equals("TIKTOK_CONFIRMING")
-                && clickScheduleControl(root)) {
-            clearPickerAttempts(task.id);
-            return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
+        if ("TIKTOK_SCHEDULE_READY".equals(state)) {
+            if (clickFirst(root, "Publier", "Post")) {
+                mark(task, "TIKTOK_CONFIRMING", "TIKTOK — validation de la programmation");
+            }
+            return;
         }
 
-        if (state.equals("TIKTOK_SCHEDULE_READY") && clickFirst(root, "publier", "post")) {
-            return mark(task, "TIKTOK_CONFIRMING", "TIKTOK — VALIDATION DE LA PROGRAMMATION");
+        if (clickFirst(root, "Suivant", "Next", "Continuer", "Continue")) {
+            mark(task, state, "TIKTOK — navigation en cours");
         }
-
-        if (!state.startsWith("TIKTOK_PICKER_")
-                && !state.equals("TIKTOK_SCHEDULE_READY")
-                && !state.equals("TIKTOK_CONFIRMING")
-                && clickFirst(root, "suivant", "next", "continuer", "continue")) {
-            return mark(task, state, "TIKTOK — NAVIGATION EN COURS");
-        }
-        return false;
     }
 
     private boolean ensureTikTokMetadata(AccessibilityNodeInfo root, PublicationTask task) {
-        String expected = PublicationAlarmReceiver.buildMetadata(task);
-        if (expected.trim().isEmpty()) {
-            getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putBoolean("meta_ok_" + task.id, true).apply();
+        String expected = PublicationAlarmReceiver.buildMetadata(task).trim();
+        if (expected.isEmpty()) {
+            getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
+                    .putBoolean("meta_ok_" + task.id, true).apply();
             return true;
         }
         List<AccessibilityNodeInfo> fields = new ArrayList<>();
@@ -156,301 +142,259 @@ public class BotAccessibilityService extends AccessibilityService {
         try {
             for (AccessibilityNodeInfo field : fields) {
                 if (!field.isVisibleToUser()) continue;
-                String d = descriptor(field);
-                if (!(d.contains("description") || d.contains("caption") || d.contains("légende")
-                        || d.contains("legende") || d.contains("édit") || fields.size() == 1)) continue;
-                if (field.getText() != null && expected.equals(field.getText().toString())) {
-                    getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putBoolean("meta_ok_" + task.id, true).apply();
+                String current = field.getText() == null ? "" : field.getText().toString().trim();
+                if (expected.equals(current)) {
+                    getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
+                            .putBoolean("meta_ok_" + task.id, true).apply();
                     return true;
                 }
+                String d = descriptor(field);
+                if (!(d.contains("description") || d.contains("caption") || d.contains("légende")
+                        || d.contains("legende") || fields.size() == 1)) continue;
                 field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-                boolean set = setText(field, expected);
-                if (!set) {
-                    android.content.ClipboardManager clipboard = (android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
-                    if (clipboard != null) {
-                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Super Bot", expected));
-                        set = field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+                boolean ok = setText(field, expected);
+                if (!ok) {
+                    android.content.ClipboardManager cb = (android.content.ClipboardManager)
+                            getSystemService(CLIPBOARD_SERVICE);
+                    if (cb != null) {
+                        cb.setPrimaryClip(android.content.ClipData.newPlainText("Super Bot", expected));
+                        ok = field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
                     }
                 }
-                mark(task, "TIKTOK_METADATA_PENDING", set ? "TIKTOK — texte envoyé, vérification en cours"
-                        : "TIKTOK — champ texte inaccessible");
+                mark(task, "TIKTOK_METADATA_PENDING",
+                        ok ? "TIKTOK — métadonnées envoyées" : "TIKTOK — champ métadonnées inaccessible");
                 return false;
             }
-        } finally { recycle(fields); }
+        } finally {
+            recycle(fields);
+        }
         if (clickFirst(root, "Ajouter une description", "Add description", "Add a description")) {
-            mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — ouverture du champ texte");
-        } else if (clickFirst(root, "suivant", "next", "continuer")) {
-            mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — accès au texte de publication");
-        } else {
-            mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — texte non vérifié, programmation en attente");
+            mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — ouverture du champ description");
         }
         return false;
+    }
+
+    private void adjustTikTokPicker(AccessibilityNodeInfo root, PublicationTask task) {
+        if (task.scheduledAt <= System.currentTimeMillis() + 60000L) {
+            mark(task, "TIKTOK_PAUSED", "TIKTOK — date programmée trop proche ou dépassée");
+            return;
+        }
+
+        List<AccessibilityNodeInfo> wheels = findPickerWheels(root);
+        try {
+            if (wheels.size() != 3) {
+                mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — les 3 roues ne sont pas encore accessibles");
+                return;
+            }
+
+            Calendar target = Calendar.getInstance();
+            target.setTimeInMillis(task.scheduledAt);
+
+            String dateText = centeredText(wheels.get(0));
+            Calendar currentDate = parseVisibleDate(dateText);
+            if (currentDate == null) {
+                mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture de la date en cours");
+                return;
+            }
+            if (!sameDay(currentDate, target)) {
+                int direction = target.after(currentDate) ? 1 : -1;
+                resetVerify(task.id);
+                boolean moved = swipeWheel(wheels.get(0), direction);
+                mark(task, "TIKTOK_PICKER_DATE", moved
+                        ? "TIKTOK — défilement de la date vers " + formatDate(target)
+                        : "TIKTOK — impossible de faire défiler la date");
+                return;
+            }
+
+            Integer currentHour = parseCenteredNumber(wheels.get(1));
+            if (currentHour == null) {
+                mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture de l'heure en cours");
+                return;
+            }
+            int targetHour = target.get(Calendar.HOUR_OF_DAY);
+            if (currentHour != targetHour) {
+                int direction = targetHour > currentHour ? 1 : -1;
+                resetVerify(task.id);
+                boolean moved = swipeWheel(wheels.get(1), direction);
+                mark(task, "TIKTOK_PICKER_HOUR", moved
+                        ? "TIKTOK — réglage de l'heure à " + String.format(Locale.FRANCE, "%02d", targetHour)
+                        : "TIKTOK — impossible de faire défiler l'heure");
+                return;
+            }
+
+            Integer currentMinute = parseCenteredNumber(wheels.get(2));
+            if (currentMinute == null) {
+                mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture des minutes en cours");
+                return;
+            }
+            int targetMinute = target.get(Calendar.MINUTE);
+            if (currentMinute != targetMinute) {
+                int direction = targetMinute > currentMinute ? 1 : -1;
+                resetVerify(task.id);
+                boolean moved = swipeWheel(wheels.get(2), direction);
+                mark(task, "TIKTOK_PICKER_MINUTE", moved
+                        ? "TIKTOK — réglage des minutes à " + String.format(Locale.FRANCE, "%02d", targetMinute)
+                        : "TIKTOK — impossible de faire défiler les minutes");
+                return;
+            }
+
+            int verified = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                    .getInt("picker_verified_" + task.id, 0) + 1;
+            getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
+                    .putInt("picker_verified_" + task.id, verified).apply();
+            if (verified < 2) {
+                mark(task, "TIKTOK_PICKER_VERIFY", "TIKTOK — contrôle final de la date et de l'heure");
+                return;
+            }
+
+            if (clickFirst(root, "Terminé", "Done")) {
+                mark(task, "TIKTOK_SCHEDULE_READY", "TIKTOK — date et heure validées");
+            }
+        } finally {
+            recycle(wheels);
+        }
+    }
+
+    private List<AccessibilityNodeInfo> findPickerWheels(AccessibilityNodeInfo root) {
+        List<AccessibilityNodeInfo> candidates = new ArrayList<>();
+        collectScrollable(root, candidates);
+        List<AccessibilityNodeInfo> leaves = new ArrayList<>();
+        for (AccessibilityNodeInfo node : candidates) {
+            Rect box = new Rect();
+            node.getBoundsInScreen(box);
+            if (!node.isVisibleToUser() || box.width() < 30 || box.height() < 80) continue;
+            boolean containsOther = false;
+            for (AccessibilityNodeInfo other : candidates) {
+                if (node == other) continue;
+                Rect child = new Rect();
+                other.getBoundsInScreen(child);
+                if (!box.equals(child) && box.contains(child)) {
+                    containsOther = true;
+                    break;
+                }
+            }
+            if (!containsOther) leaves.add(AccessibilityNodeInfo.obtain(node));
+        }
+        recycle(candidates);
+        Collections.sort(leaves, (a, b) -> {
+            Rect x = new Rect();
+            Rect y = new Rect();
+            a.getBoundsInScreen(x);
+            b.getBoundsInScreen(y);
+            return Integer.compare(x.centerX(), y.centerX());
+        });
+        if (leaves.size() > 3) {
+            List<AccessibilityNodeInfo> three = new ArrayList<>();
+            for (int i = 0; i < 3; i++) three.add(AccessibilityNodeInfo.obtain(leaves.get(i)));
+            recycle(leaves);
+            return three;
+        }
+        return leaves;
     }
 
     private boolean swipeWheel(AccessibilityNodeInfo wheel, int direction) {
         if (Build.VERSION.SDK_INT < 24) return false;
-        android.graphics.Rect box = new android.graphics.Rect(); wheel.getBoundsInScreen(box);
-        if (box.width() < 20 || box.height() < 40 || !wheel.isVisibleToUser()) return false;
-        float distance = Math.min(box.height() * 0.22f, 80 * getResources().getDisplayMetrics().density);
-        android.graphics.Path path = new android.graphics.Path();
-        path.moveTo(box.centerX(), box.centerY() + (direction >= 0 ? distance/2 : -distance/2));
-        path.lineTo(box.centerX(), box.centerY() + (direction >= 0 ? -distance/2 : distance/2));
-        return dispatchGesture(new android.accessibilityservice.GestureDescription.Builder()
-                .addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 300)).build(), null, null);
-    }
+        Rect box = new Rect();
+        wheel.getBoundsInScreen(box);
+        if (box.width() < 20 || box.height() < 60 || !wheel.isVisibleToUser()) return false;
 
-    private void appendDiagnostic(String line) {
-        android.content.SharedPreferences prefs = getSharedPreferences("superbot_diagnostic", MODE_PRIVATE);
-        String previous = prefs.getString("clock", "");
-        String next = previous + "\n" + System.currentTimeMillis() + " " + line;
-        if (next.length() > 48000) next = next.substring(next.length() - 48000);
-        prefs.edit().putString("clock", next).apply();
-    }
-
-    private void recordPicker(AccessibilityNodeInfo root, PublicationTask task, List<AccessibilityNodeInfo> wheels) {
-        StringBuilder report = new StringBuilder("version=").append(AppUpdateManager.installedVersion(this))
-                .append(" state=").append(getState(task.id)).append(" target=").append(task.scheduledAt)
-                .append(" zone=").append(java.util.TimeZone.getDefault().getID())
-                .append(" candidates=").append(wheels.size());
-        for (AccessibilityNodeInfo wheel : wheels) {
-            android.graphics.Rect box = new android.graphics.Rect(); wheel.getBoundsInScreen(box);
-            report.append("\nwheel class=").append(wheel.getClassName()).append(" bounds=").append(box)
-                    .append(" scroll=").append(wheel.isScrollable()).append(" visible=").append(wheel.isVisibleToUser())
-                    .append(" actions=").append(wheel.getActions());
-        }
-        List<AccessibilityNodeInfo> labels = new ArrayList<>(); collectLabels(root, labels);
-        int count = 0;
-        for (AccessibilityNodeInfo node : labels) {
-            String value = node.getText().toString().trim();
-            // Only date/time labels, never captions or account information.
-            if (value.matches("[0-9]{1,2}") || value.equalsIgnoreCase("Aujourd'hui")
-                    || value.matches("(?i)(janv|févr|mars|avr|mai|juin|juil|août|sept|oct|nov|déc)\\.? [0-9]{1,2}.*")) {
-                android.graphics.Rect box = new android.graphics.Rect(); node.getBoundsInScreen(box);
-                report.append("\nlabel=").append(value).append(" bounds=").append(box)
-                        .append(" selected=").append(node.isSelected()).append(" visible=").append(node.isVisibleToUser());
-                if (++count >= 80) break;
-            }
-        }
-        recycle(labels);
-        appendDiagnostic(report.toString());
-    }
-
-    private boolean adjustPicker(AccessibilityNodeInfo root, PublicationTask task) {
-        List<AccessibilityNodeInfo> all = new ArrayList<>();
-        collectScrollable(root, all);
-        recordPicker(root, task, all);
-        List<AccessibilityNodeInfo> wheels = new ArrayList<>();
-        for (AccessibilityNodeInfo node : all) {
-            android.graphics.Rect box = new android.graphics.Rect();
-            node.getBoundsInScreen(box);
-            if (!node.isVisibleToUser() || box.isEmpty()) continue;
-            boolean containsWheel = false;
-            for (AccessibilityNodeInfo other : all) {
-                android.graphics.Rect child = new android.graphics.Rect();
-                other.getBoundsInScreen(child);
-                if (!node.equals(other) && !box.equals(child) && box.contains(child)) containsWheel = true;
-            }
-            if (!containsWheel) wheels.add(node);
-        }
-        java.util.Collections.sort(wheels, (a,b) -> {
-            android.graphics.Rect x = new android.graphics.Rect(), y = new android.graphics.Rect();
-            a.getBoundsInScreen(x); b.getBoundsInScreen(y);
-            return Integer.compare(x.centerX(), y.centerX());
-        });
-        try {
-            if (wheels.size() != 3) {
-                return mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — roues non lisibles, aucune validation envoyée");
-            }
-            java.util.Calendar target = java.util.Calendar.getInstance();
-            target.setTimeInMillis(task.scheduledAt);
-            if (task.scheduledAt <= System.currentTimeMillis() + 60000) {
-                return mark(task, "TIKTOK_PAUSED", "TIKTOK — date trop proche ou dépassée");
-            }
-            if (task.scheduledAt - System.currentTimeMillis() > 31L * 86400000L)
-                return mark(task, "TIKTOK_PAUSED", "TIKTOK — date hors de la plage prise en charge");
-            for (int i = 0; i < 3; i++) {
-                String value = centeredText(wheels.get(i));
-                unchangedWheelReads[i] = value.equals(previousWheelValues[i]) ? unchangedWheelReads[i] + 1 : 0;
-                previousWheelValues[i] = value;
-                boolean matches;
-                int direction = 1;
-                if (i == 0) {
-                    matches = dateMatches(value, target);
-                    if (value.isEmpty()) return mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — date centrale non lisible");
-                    java.util.Calendar probe = java.util.Calendar.getInstance();
-                    for (int offset=0; offset<=31; offset++) {
-                        if (dateMatches(value, probe)) {
-                            direction = Long.compare(target.getTimeInMillis(), probe.getTimeInMillis());
-                            break;
-                        }
-                        probe.add(java.util.Calendar.DAY_OF_YEAR, 1);
-                    }
-                    // Prefer a visible matching date; never confuse a day with an hour.
-                    if (!matches && clickDate(wheels.get(i), target))
-                        return mark(task, "TIKTOK_PICKER_ADJUST", "TIKTOK — réglage de la date");
-                } else {
-                    int wanted = target.get(i == 1 ? java.util.Calendar.HOUR_OF_DAY : java.util.Calendar.MINUTE);
-                    int current;
-                    try { current = Integer.parseInt(value.trim()); }
-                    catch (NumberFormatException e) { return mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — valeur centrale non lisible"); }
-                    matches = current == wanted;
-                    direction = Integer.compare(wanted, current);
-                }
-                if (!matches) {
-                    boolean moved;
-                    boolean gesture = unchangedWheelReads[i] >= 2;
-                    if (gesture) {
-                        moved = swipeWheel(wheels.get(i), direction);
-                        unchangedWheelReads[i] = 0;
-                    } else {
-                        moved = wheels.get(i).performAction(direction >= 0
-                                ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
-                        if (!moved) { gesture = true; moved = swipeWheel(wheels.get(i), direction); }
-                    }
-                    appendDiagnostic("wheel=" + i + " center=" + value + " direction=" + direction
-                            + " gesture=" + gesture + " accepted=" + moved);
-                    return mark(task, "TIKTOK_PICKER_ADJUST", moved ? "TIKTOK — réglage des roues en cours"
-                            : "TIKTOK — roue inaccessible, vérifier l'écran");
-                }
-            }
-            // Require two consecutive reads after animations settle.
-            if (!getState(task.id).equals("TIKTOK_PICKER_VERIFIED"))
-                return mark(task, "TIKTOK_PICKER_VERIFIED", "TIKTOK — date et heure contrôlées");
-            if (clickExact(root, "Terminé") || clickExact(root, "Done"))
-                return mark(task, "TIKTOK_SCHEDULE_READY", "TIKTOK — date et heure validées");
-            return true;
-        } finally { recycle(all); }
+        float row = Math.max(28f * getResources().getDisplayMetrics().density, box.height() * 0.18f);
+        row = Math.min(row, box.height() * 0.32f);
+        float startY = box.centerY() + (direction > 0 ? row * 0.55f : -row * 0.55f);
+        float endY = box.centerY() + (direction > 0 ? -row * 0.55f : row * 0.55f);
+        Path path = new Path();
+        path.moveTo(box.centerX(), startY);
+        path.lineTo(box.centerX(), endY);
+        GestureDescription gesture = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 360)).build();
+        boolean accepted = dispatchGesture(gesture, null, null);
+        lastActionAt = System.currentTimeMillis();
+        return accepted;
     }
 
     private static String centeredText(AccessibilityNodeInfo wheel) {
-        android.graphics.Rect bounds = new android.graphics.Rect(); wheel.getBoundsInScreen(bounds);
-        List<AccessibilityNodeInfo> labels = new ArrayList<>(); collectLabels(wheel, labels);
-        String value = ""; int distance = Integer.MAX_VALUE;
+        Rect wheelBox = new Rect();
+        wheel.getBoundsInScreen(wheelBox);
+        List<AccessibilityNodeInfo> labels = new ArrayList<>();
+        collectLabels(wheel, labels);
+        String best = "";
+        int bestDistance = Integer.MAX_VALUE;
         for (AccessibilityNodeInfo node : labels) {
-            android.graphics.Rect box = new android.graphics.Rect(); node.getBoundsInScreen(box);
-            int delta = Math.abs(box.centerY() - bounds.centerY());
-            if (node.isVisibleToUser() && bounds.contains(box.centerX(), box.centerY()) && delta < distance) {
-                distance = delta; value = node.getText().toString();
+            if (!node.isVisibleToUser() || node.getText() == null) continue;
+            Rect box = new Rect();
+            node.getBoundsInScreen(box);
+            int distance = Math.abs(box.centerY() - wheelBox.centerY());
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = node.getText().toString().trim();
             }
         }
-        recycle(labels); return value;
+        recycle(labels);
+        return best;
     }
 
-    private static void collectLabels(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
-        if (node.getChildCount() == 0 && node.getText() != null) out.add(AccessibilityNodeInfo.obtain(node));
-        for (int i=0; i<node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) { collectLabels(child, out); child.recycle(); }
-        }
-    }
-
-    private static boolean dateMatches(String text, java.util.Calendar target) {
-        String value = text.toLowerCase(Locale.FRANCE).replace(".", "").replace("’", "'").trim();
-        java.util.Calendar today = java.util.Calendar.getInstance();
-        if (value.equals("aujourd'hui") || value.equals("today"))
-            return target.get(java.util.Calendar.YEAR) == today.get(java.util.Calendar.YEAR)
-                    && target.get(java.util.Calendar.DAY_OF_YEAR) == today.get(java.util.Calendar.DAY_OF_YEAR);
-        String day = String.valueOf(target.get(java.util.Calendar.DAY_OF_MONTH));
-        String month = new SimpleDateFormat("MMM", Locale.FRANCE).format(target.getTime()).toLowerCase(Locale.FRANCE).replace(".", "");
-        return value.contains(month) && java.util.regex.Pattern.compile("(?<![0-9])" + day + "(?![0-9])").matcher(value).find();
-    }
-
-    private static boolean clickDate(AccessibilityNodeInfo wheel, java.util.Calendar target) {
-        List<AccessibilityNodeInfo> labels = new ArrayList<>(); collectLabels(wheel, labels);
+    private static Integer parseCenteredNumber(AccessibilityNodeInfo wheel) {
+        String value = centeredText(wheel).replaceAll("[^0-9]", "");
+        if (value.isEmpty()) return null;
         try {
-            for (AccessibilityNodeInfo node : labels)
-                if (node.isVisibleToUser() && dateMatches(node.getText().toString(), target)
-                        && node.isClickable() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
-            return false;
-        } finally { recycle(labels); }
-    }
-
-    private static void collectScrollable(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
-        if (node == null) return;
-        if (node.isScrollable() || (node.getClassName() != null
-                && node.getClassName().toString().contains("NumberPicker"))) out.add(AccessibilityNodeInfo.obtain(node));
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) {
-                collectScrollable(child, out);
-                child.recycle();
-            }
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 
-    private int getPickerAttempt(String taskId, String kind) {
-        return getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .getInt("picker_" + kind + "_" + taskId, 0);
+    private Calendar parseVisibleDate(String text) {
+        if (text == null) return null;
+        String normalized = text.toLowerCase(Locale.FRANCE)
+                .replace(".", "").replace("’", "'").trim();
+        Calendar today = Calendar.getInstance();
+        zeroTime(today);
+        if (normalized.contains("aujourd'hui") || normalized.contains("today")) return today;
+
+        for (int offset = 0; offset <= 31; offset++) {
+            Calendar probe = (Calendar) today.clone();
+            probe.add(Calendar.DAY_OF_YEAR, offset);
+            if (dateLabelMatches(normalized, probe)) return probe;
+        }
+        return null;
     }
 
-    private void setPickerAttempt(String taskId, String kind, int value) {
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .edit().putInt("picker_" + kind + "_" + taskId, value).apply();
+    private static boolean dateLabelMatches(String normalized, Calendar date) {
+        String day = String.valueOf(date.get(Calendar.DAY_OF_MONTH));
+        String month = new SimpleDateFormat("MMM", Locale.FRANCE).format(date.getTime())
+                .toLowerCase(Locale.FRANCE).replace(".", "");
+        return normalized.contains(month)
+                && java.util.regex.Pattern.compile("(?<![0-9])" + day + "(?![0-9])")
+                .matcher(normalized).find();
     }
 
-    private void resetPickerAttempt(String taskId, String kind) {
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .edit().remove("picker_" + kind + "_" + taskId).apply();
+    private static boolean sameDay(Calendar a, Calendar b) {
+        return a.get(Calendar.YEAR) == b.get(Calendar.YEAR)
+                && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR);
     }
 
-    private void clearPickerAttempts(String taskId) {
+    private static void zeroTime(Calendar c) {
+        c.set(Calendar.HOUR_OF_DAY, 0);
+        c.set(Calendar.MINUTE, 0);
+        c.set(Calendar.SECOND, 0);
+        c.set(Calendar.MILLISECOND, 0);
+    }
+
+    private static String formatDate(Calendar c) {
+        return new SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(c.getTime());
+    }
+
+    private void resetVerify(String taskId) {
         getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                .remove("picker_date_" + taskId)
-                .remove("picker_hour_" + taskId)
-                .remove("picker_minute_" + taskId)
-                .remove("picker_time_" + taskId)
-                .apply();
+                .remove("picker_verified_" + taskId).apply();
+    }
+
+    private void clearPickerState(String taskId) {
+        resetVerify(taskId);
     }
 
     private boolean clickScheduleControl(AccessibilityNodeInfo root) {
-        String[] labels = {"programmer la publication", "programmer", "schedule post", "schedule"};
-        for (String label : labels) {
-            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
-            if (nodes == null) continue;
-            for (AccessibilityNodeInfo node : nodes) {
-                if (clickNode(node) || clickNearbyCheckable(node)) {
-                    recycle(nodes);
-                    return true;
-                }
-            }
-            recycle(nodes);
-        }
-        return false;
-    }
-
-    private static boolean clickNearbyCheckable(AccessibilityNodeInfo node) {
-        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
-        try {
-            for (int level = 0; level < 4 && current != null; level++) {
-                if (clickCheckableDescendant(current)) return true;
-                AccessibilityNodeInfo parent = current.getParent();
-                current.recycle();
-                current = parent;
-            }
-            return false;
-        } finally {
-            if (current != null) current.recycle();
-        }
-    }
-
-    private static boolean clickCheckableDescendant(AccessibilityNodeInfo node) {
-        if (node == null) return false;
-        if (node.isEnabled() && (node.isCheckable() || node.isClickable())) {
-            CharSequence cls = node.getClassName();
-            String className = cls == null ? "" : cls.toString().toLowerCase(Locale.ROOT);
-            if (node.isCheckable() || className.contains("switch") || className.contains("checkbox")) {
-                return node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            }
-        }
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) {
-                boolean clicked = clickCheckableDescendant(child);
-                child.recycle();
-                if (clicked) return true;
-            }
-        }
-        return false;
+        return clickFirst(root, "Programmer la publication", "Programmer", "Schedule post", "Schedule");
     }
 
     private static boolean scrollForward(AccessibilityNodeInfo root) {
@@ -459,16 +403,16 @@ public class BotAccessibilityService extends AccessibilityService {
         for (int i = 0; i < root.getChildCount(); i++) {
             AccessibilityNodeInfo child = root.getChild(i);
             if (child != null) {
-                boolean scrolled = scrollForward(child);
+                boolean ok = scrollForward(child);
                 child.recycle();
-                if (scrolled) return true;
+                if (ok) return true;
             }
         }
         return false;
     }
 
     private void runGeneric(AccessibilityNodeInfo root, PublicationTask task) {
-        if (containsAny(root, "publié", "published", "mise en ligne terminée", "upload complete")) {
+        if (containsAny(root, "publié", "published", "upload complete")) {
             finish(task, "PUBLIÉ");
             return;
         }
@@ -476,11 +420,11 @@ public class BotAccessibilityService extends AccessibilityService {
             mark(task, getState(task.id), "MÉTADONNÉES REMPLIES");
             return;
         }
-        if (clickFirst(root, "suivant", "next", "continuer", "continue")) {
+        if (clickFirst(root, "Suivant", "Next", "Continuer", "Continue")) {
             mark(task, getState(task.id), "NAVIGATION EN COURS");
             return;
         }
-        if (clickFirst(root, "publier", "post", "mettre en ligne", "upload")) {
+        if (clickFirst(root, "Publier", "Post", "Mettre en ligne", "Upload")) {
             mark(task, getState(task.id), "VALIDATION ENVOYÉE");
         }
     }
@@ -491,19 +435,23 @@ public class BotAccessibilityService extends AccessibilityService {
         if (editable.isEmpty()) return false;
         String combined = PublicationAlarmReceiver.buildMetadata(task);
         boolean changed = false;
-        for (AccessibilityNodeInfo node : editable) {
-            if (!node.isEditable()) continue;
-            CharSequence currentText = node.getText();
-            if (currentText != null && currentText.length() > 0) continue;
-            String d = descriptor(node);
-            String value = null;
-            if (d.contains("title") || d.contains("titre")) value = safe(task.title);
-            else if (d.contains("description") || d.contains("caption") || d.contains("légende") || d.contains("legende")) value = joined(task.description, task.hashtags);
-            else if (d.contains("hashtag")) value = safe(task.hashtags);
-            else if (editable.size() == 1) value = combined;
-            if (!TextUtils.isEmpty(value) && setText(node, value)) changed = true;
+        try {
+            for (AccessibilityNodeInfo node : editable) {
+                if (!node.isEditable()) continue;
+                CharSequence current = node.getText();
+                if (current != null && current.length() > 0) continue;
+                String d = descriptor(node);
+                String value = null;
+                if (d.contains("title") || d.contains("titre")) value = safe(task.title);
+                else if (d.contains("description") || d.contains("caption") || d.contains("légende")
+                        || d.contains("legende")) value = joined(task.description, task.hashtags);
+                else if (d.contains("hashtag")) value = safe(task.hashtags);
+                else if (editable.size() == 1) value = combined;
+                if (!TextUtils.isEmpty(value) && setText(node, value)) changed = true;
+            }
+        } finally {
+            recycle(editable);
         }
-        recycle(editable);
         return changed;
     }
 
@@ -511,10 +459,40 @@ public class BotAccessibilityService extends AccessibilityService {
         if (node == null) return;
         if (node.isEditable()) out.add(AccessibilityNodeInfo.obtain(node));
         for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo c = node.getChild(i);
-            if (c != null) {
-                collectEditable(c, out);
-                c.recycle();
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                collectEditable(child, out);
+                child.recycle();
+            }
+        }
+    }
+
+    private static void collectScrollable(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
+        if (node == null) return;
+        CharSequence cls = node.getClassName();
+        String className = cls == null ? "" : cls.toString();
+        if (node.isScrollable() || className.contains("NumberPicker")) {
+            out.add(AccessibilityNodeInfo.obtain(node));
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                collectScrollable(child, out);
+                child.recycle();
+            }
+        }
+    }
+
+    private static void collectLabels(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
+        if (node == null) return;
+        if (node.getText() != null && node.getChildCount() == 0) {
+            out.add(AccessibilityNodeInfo.obtain(node));
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                collectLabels(child, out);
+                child.recycle();
             }
         }
     }
@@ -529,42 +507,28 @@ public class BotAccessibilityService extends AccessibilityService {
     }
 
     private static boolean setText(AccessibilityNodeInfo node, String value) {
-        Bundle a = new Bundle();
-        a.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
-        return node.isEditable() && node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, a);
-    }
-
-    private static boolean clickExact(AccessibilityNodeInfo root, String label) {
-        List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
-        if (nodes == null) return false;
-        for (AccessibilityNodeInfo x : nodes) {
-            CharSequence t = x.getText();
-            if (t != null && label.equalsIgnoreCase(t.toString().trim()) && clickNode(x)) {
-                recycle(nodes);
-                return true;
-            }
-        }
-        recycle(nodes);
-        return false;
+        Bundle args = new Bundle();
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
+        return node.isEditable() && node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
     }
 
     private static boolean clickFirst(AccessibilityNodeInfo root, String... labels) {
         for (String label : labels) {
             List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
             if (nodes == null) continue;
-            for (AccessibilityNodeInfo x : nodes) {
-                if (clickNode(x)) {
-                    recycle(nodes);
-                    return true;
+            try {
+                for (AccessibilityNodeInfo node : nodes) {
+                    if (clickNode(node)) return true;
                 }
+            } finally {
+                recycle(nodes);
             }
-            recycle(nodes);
         }
         return false;
     }
 
-    private static boolean clickNode(AccessibilityNodeInfo n) {
-        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(n);
+    private static boolean clickNode(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = AccessibilityNodeInfo.obtain(node);
         try {
             while (current != null) {
                 if (current.isClickable() && current.isEnabled()) {
@@ -584,10 +548,52 @@ public class BotAccessibilityService extends AccessibilityService {
         for (String label : labels) {
             List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
             boolean found = nodes != null && !nodes.isEmpty();
-            if (nodes != null) recycle(nodes);
+            recycle(nodes);
             if (found) return true;
         }
         return false;
+    }
+
+    private boolean mark(PublicationTask task, String state, String status) {
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
+                .putString("state_" + task.id, state).apply();
+        task.status = status;
+        PublicationTaskRepository.save(this, task);
+        lastActionAt = System.currentTimeMillis();
+        return true;
+    }
+
+    private String getState(String taskId) {
+        return getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .getString("state_" + taskId, "");
+    }
+
+    private void finish(PublicationTask task, String status) {
+        task.status = status;
+        PublicationTaskRepository.save(this, task);
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
+                .remove("active_task_id")
+                .remove("state_" + task.id)
+                .remove("picker_verified_" + task.id)
+                .remove("meta_ok_" + task.id)
+                .apply();
+        handler.removeCallbacks(retryRunnable);
+    }
+
+    private static boolean isTikTok(PublicationTask task) {
+        return task.platform != null && task.platform.toLowerCase(Locale.ROOT).contains("tiktok");
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static String joined(String a, String b) {
+        String x = safe(a);
+        String y = safe(b);
+        if (x.isEmpty()) return y;
+        if (y.isEmpty()) return x;
+        return x + "\n\n" + y;
     }
 
     private static void recycle(List<AccessibilityNodeInfo> nodes) {
@@ -597,42 +603,12 @@ public class BotAccessibilityService extends AccessibilityService {
         }
     }
 
-    private boolean mark(PublicationTask task, String state, String status) {
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .edit().putString("state_" + task.id, state).apply();
-        task.status = status;
-        PublicationTaskRepository.save(this, task);
-        lastActionAt = System.currentTimeMillis();
-        return true;
-    }
+    @Override
+    public void onInterrupt() {}
 
-    private String getState(String id) {
-        return getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .getString("state_" + id, "");
+    @Override
+    public void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
-
-    private void finish(PublicationTask task, String status) {
-        clearPickerAttempts(task.id);
-        task.status = status;
-        PublicationTaskRepository.save(this, task);
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .edit().remove("active_task_id").remove("state_" + task.id).apply();
-    }
-
-    private static boolean isTikTok(PublicationTask t) {
-        return t.platform != null && t.platform.toLowerCase(Locale.ROOT).contains("tiktok");
-    }
-
-    private static String safe(String v) {
-        return v == null ? "" : v.trim();
-    }
-
-    private static String joined(String a, String b) {
-        String x = safe(a), y = safe(b);
-        if (x.isEmpty()) return y;
-        if (y.isEmpty()) return x;
-        return x + "\n\n" + y;
-    }
-
-    @Override public void onInterrupt() {}
 }
