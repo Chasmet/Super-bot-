@@ -48,6 +48,23 @@ public class BotAccessibilityService extends AccessibilityService {
     String s=state(t.id);if("TIKTOK_PAUSED".equals(s))return;
     if("TIKTOK_CONFIRMING".equals(s)&&has(r,"publication programmée","post scheduled","scheduled")){finish(t,"PROGRAMMÉ");return;}
     if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}
+
+    // Une fois les roues validées, TikTok revient sur la feuille "Plus d'options".
+    // Il faut la fermer avant d'appuyer sur Publier. Sinon le bot réouvre l'horloge en boucle.
+    if("TIKTOK_SCHEDULE_READY".equals(s)||"TIKTOK_RETURN_POST".equals(s)){
+      if(has(r,"Plus d’options","Plus d'options","More options")||has(r,"Programmer la publication","Schedule post")){
+        if(performGlobalAction(GLOBAL_ACTION_BACK)){
+          mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour vers l'écran Publier");
+          return;
+        }
+      }
+      if(click(r,"Publier","Post")){
+        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");
+        return;
+      }
+      return;
+    }
+
     if(has(r,"Ta Story","Your Story")&&click(r,"Suivant","Next")){mark(t,"TIKTOK_NEXT","TIKTOK — Suivant");return;}
     if(has(r,"Programmer la publication","Schedule post")&&schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte");return;}
     boolean post=has(r,"Publier","Post","Brouillons","Drafts")||has(r,"Ajouter un lien","Add link")||has(r,"Plus d’options","Plus d'options","More options");
@@ -60,7 +77,6 @@ public class BotAccessibilityService extends AccessibilityService {
       if(schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte");return;}
       if(scroll(r)||swipeUp()){mark(t,"TIKTOK_FIND_SCHEDULE","TIKTOK — recherche programmation");return;}
     }
-    if("TIKTOK_SCHEDULE_READY".equals(s)){if(click(r,"Publier","Post"))mark(t,"TIKTOK_CONFIRMING","TIKTOK — validation");return;}
     if(click(r,"Suivant","Next","Continuer","Continue"))mark(t,"TIKTOK_NEXT","TIKTOK — navigation");
   }
 
