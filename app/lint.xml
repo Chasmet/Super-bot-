@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!--
+      Les gestes TikTok utilisent les API d'accessibilité introduites en API 24.
+      BotAccessibilityService vérifie explicitement Build.VERSION.SDK_INT avant
+      d'entrer dans ce chemin. On limite donc cette règle aux appels de geste
+      concernés au lieu de désactiver NewApi pour tout le projet.
+    -->
+    <issue id="NewApi">
+        <ignore regexp="GestureDescription|GestureResultCallback|dispatchGesture" />
+    </issue>
+</lint>
