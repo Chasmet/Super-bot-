@@ -10,8 +10,8 @@ android {
         applicationId 'com.chasmet.superbot'
         minSdk 21
         targetSdk 34
-        versionCode 23
-        versionName '1.3.10'
+        versionCode 24
+        versionName '1.3.11'
     }
 
     signingConfigs {
@@ -37,4 +37,24 @@ android {
 
 dependencies {
     implementation 'androidx.core:core:1.13.1'
+}
+
+// Correctif ciblé de la roue des minutes TikTok.
+// 00..30 : sens arrière (la valeur sélectionnée diminue comme dans la démonstration utilisateur).
+// 31..59 : sens avant. Le nombre de pas suit le même sens afin de ne pas s'arrêter trop tôt.
+tasks.named('preBuild').configure {
+    doFirst {
+        def source = file('src/main/java/com/chasmet/superbot/BotAccessibilityService.java')
+        def text = source.getText('UTF-8')
+        text = text.replace(
+                'wheel(r,c.m,dir(minute,wm,60),t,"minutes → "+two(wm))',
+                'wheel(r,c.m,(wm<=30?-1:1),t,"minutes → "+two(wm))')
+        text = text.replace(
+                'int ms=dist(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60);',
+                'int tm=target.get(Calendar.MINUTE),cm=now.get(Calendar.MINUTE); int ms=tm<=30?(cm-tm+60)%60:(tm-cm+60)%60;')
+        text = text.replace(
+                '.putInt(k+"md",dir(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60))',
+                '.putInt(k+"md",target.get(Calendar.MINUTE)<=30?-1:1)')
+        source.write(text, 'UTF-8')
+    }
 }
