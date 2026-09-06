@@ -10,8 +10,8 @@ android {
         applicationId 'com.chasmet.superbot'
         minSdk 21
         targetSdk 34
-        versionCode 24
-        versionName '1.3.11'
+        versionCode 25
+        versionName '1.3.12'
     }
 
     signingConfigs {
@@ -39,13 +39,13 @@ dependencies {
     implementation 'androidx.core:core:1.13.1'
 }
 
-// Correctif ciblé de la roue des minutes TikTok.
-// 00..30 : sens arrière (la valeur sélectionnée diminue comme dans la démonstration utilisateur).
-// 31..59 : sens avant. Le nombre de pas suit le même sens afin de ne pas s'arrêter trop tôt.
+// Correctifs TikTok ciblés : sens des minutes + chemin final Terminé -> Publier.
 tasks.named('preBuild').configure {
     doFirst {
         def source = file('src/main/java/com/chasmet/superbot/BotAccessibilityService.java')
         def text = source.getText('UTF-8')
+
+        // Roue des minutes selon le cheminement observé sur TikTok.
         text = text.replace(
                 'wheel(r,c.m,dir(minute,wm,60),t,"minutes → "+two(wm))',
                 'wheel(r,c.m,(wm<=30?-1:1),t,"minutes → "+two(wm))')
@@ -55,6 +55,26 @@ tasks.named('preBuild').configure {
         text = text.replace(
                 '.putInt(k+"md",dir(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60))',
                 '.putInt(k+"md",target.get(Calendar.MINUTE)<=30?-1:1)')
+
+        // Si le bouton Terminé est affiché après validation des roues, le bot doit le valider,
+        // même si TikTok n'expose pas correctement un parent cliquable dans l'arbre Accessibility.
+        text = text.replace(
+                'if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}',
+                'if("TIKTOK_SCHEDULE_READY".equals(s)&&has(r,"Date et heure de publication","Date and time of publication")){if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — Terminé validé");}return;} if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}')
+        text = text.replace(
+                'if(click(r,"Terminé","Done"))mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées");return;',
+                'if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées, Terminé");h.removeCallbacks(retry);h.postDelayed(retry,900);}else{mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — valeurs correctes, recherche Terminé");}return;')
+
+        // Après Terminé : fermer Plus d'options, revenir à l'écran principal puis Publier.
+        text = text.replace(
+                'if(click(r,"Publier","Post")){\n        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");\n        return;\n      }',
+                'if(click(r,"Publier","Post")||tapText(r,"Publier","Post")){\n        mark(t,"TIKTOK_CONFIRMING","TIKTOK — Publier validé, programmation envoyée");\n        return;\n      }\n      if("TIKTOK_RETURN_POST".equals(s)){scroll(r);}')
+
+        // Secours tactile : toucher le centre du libellé lu à l'écran quand ACTION_CLICK est refusé.
+        text = text.replace(
+                'private static boolean click(AccessibilityNodeInfo r,String...ls){',
+                'private boolean tapText(AccessibilityNodeInfo r,String...ls){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}\n  private static boolean click(AccessibilityNodeInfo r,String...ls){')
+
         source.write(text, 'UTF-8')
     }
 }
