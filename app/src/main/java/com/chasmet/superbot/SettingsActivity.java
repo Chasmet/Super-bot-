@@ -20,6 +20,7 @@ public class SettingsActivity extends Activity {
     private TextView latestVersion;
     private TextView automationStatus;
     private TextView botModeStatus;
+    private TextView mcpStatus;
     private Button botPowerButton;
     private ProgressBar updateProgress;
     private File downloadedApk;
@@ -35,6 +36,7 @@ public class SettingsActivity extends Activity {
         latestVersion = findViewById(R.id.textLatestVersion);
         automationStatus = findViewById(R.id.textAutomationStatus);
         botModeStatus = findViewById(R.id.textBotMode);
+        mcpStatus = findViewById(R.id.textMcpStatus);
         botPowerButton = findViewById(R.id.buttonBotPower);
         updateProgress = findViewById(R.id.updateProgress);
 
@@ -56,22 +58,27 @@ public class SettingsActivity extends Activity {
         });
         findViewById(R.id.rowAccounts).setOnClickListener(v -> toast("Super Bot utilise les comptes déjà connectés dans TikTok, Instagram et YouTube"));
         botPowerButton.setOnClickListener(v -> toggleBotPower());
-        findViewById(R.id.buttonMcpConnect).setOnClickListener(v -> toast("MCP prévu pour la prochaine mise à jour"));
-        findViewById(R.id.buttonMcpTest).setOnClickListener(v -> toast("Le moteur local fonctionne sans MCP"));
+        findViewById(R.id.buttonMcpConnect).setOnClickListener(v -> {
+            McpConnectionService.start(this);
+            mcpStatus.setText("Connexion à Render en cours…");
+            mcpStatus.postDelayed(this::refreshMcpStatus, 2500);
+        });
+        findViewById(R.id.buttonMcpTest).setOnClickListener(v -> {
+            refreshMcpStatus();
+            toast(McpConnectionService.statusText(this));
+        });
         findViewById(R.id.buttonCheckUpdate).setOnClickListener(v -> checkForUpdate());
         findViewById(R.id.buttonBack).setOnClickListener(v -> finish());
         refreshBotMode();
+        refreshMcpStatus();
     }
 
     private void toggleBotPower() {
         boolean newState = !PublicationAlarmReceiver.isSuperBotAwake(this);
         PublicationAlarmReceiver.setSuperBotAwake(this, newState);
         refreshBotMode();
-        if (newState) {
-            toast("Super Bot est connecté et réveillé");
-        } else {
-            toast("Super Bot est déconnecté. Il dort et ne fera plus aucune action automatique.");
-        }
+        if (newState) toast("Super Bot est connecté et réveillé");
+        else toast("Super Bot est déconnecté. Il dort et ne fera plus aucune action automatique.");
     }
 
     private void refreshBotMode() {
@@ -81,17 +88,23 @@ public class SettingsActivity extends Activity {
         botPowerButton.setText(awake ? "DÉCONNECTER SUPER BOT" : "CONNECTER SUPER BOT");
     }
 
+    private void refreshMcpStatus() {
+        if (mcpStatus == null) return;
+        boolean connected = McpConnectionService.isConnected(this);
+        mcpStatus.setText(McpConnectionService.statusText(this));
+        mcpStatus.setTextColor(connected ? 0xFF59E391 : 0xFFFFB84D);
+    }
+
     @Override protected void onResume() {
         super.onResume();
+        McpConnectionService.start(this);
         refreshAutomationStatus();
         refreshBotMode();
+        refreshMcpStatus();
         if (waitingPermission) {
             waitingPermission = false;
-            if (Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls()) {
-                installDownloaded();
-            } else {
-                latestVersion.setText("Autorisation refusée. Appuie sur le bouton pour réessayer.");
-            }
+            if (Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls()) installDownloaded();
+            else latestVersion.setText("Autorisation refusée. Appuie sur le bouton pour réessayer.");
         }
     }
 
@@ -169,9 +182,7 @@ public class SettingsActivity extends Activity {
         if (TextUtils.isEmpty(enabled)) return false;
         TextUtils.SimpleStringSplitter splitter = new TextUtils.SimpleStringSplitter(':');
         splitter.setString(enabled);
-        while (splitter.hasNext()) {
-            if (expected.equalsIgnoreCase(splitter.next())) return true;
-        }
+        while (splitter.hasNext()) if (expected.equalsIgnoreCase(splitter.next())) return true;
         return false;
     }
 
@@ -202,11 +213,9 @@ public class SettingsActivity extends Activity {
                     updateManager.downloadAndInstall(release, this);
                 });
             }
-
             @Override public void onDownloadProgress(int percent) {
                 runOnUiThread(() -> { if (isDestroyed()) return; updateProgress.setProgress(percent); latestVersion.setText("Téléchargement : " + percent + " %"); });
             }
-
             @Override public void onDownloaded(File apk) {
                 runOnUiThread(() -> {
                     if (isDestroyed()) return;
@@ -216,7 +225,6 @@ public class SettingsActivity extends Activity {
                     installDownloaded();
                 });
             }
-
             @Override public void onError(String message) {
                 runOnUiThread(() -> {
                     if (isDestroyed()) return;
@@ -232,9 +240,7 @@ public class SettingsActivity extends Activity {
         findViewById(R.id.buttonCheckUpdate).setEnabled(true);
     }
 
-    private void toast(String message) {
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-    }
+    private void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
 
     @Override protected void onDestroy() {
         if (updateManager != null) updateManager.close();
