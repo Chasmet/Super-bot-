@@ -10,8 +10,8 @@ android {
         applicationId 'com.chasmet.superbot'
         minSdk 21
         targetSdk 34
-        versionCode 25
-        versionName '1.3.12'
+        versionCode 26
+        versionName '1.3.13'
     }
 
     signingConfigs {
@@ -39,7 +39,7 @@ dependencies {
     implementation 'androidx.core:core:1.13.1'
 }
 
-// Correctifs TikTok ciblés : sens des minutes + chemin final Terminé -> Publier.
+// Correctifs TikTok ciblés + pont MCP Render.
 tasks.named('preBuild').configure {
     doFirst {
         def source = file('src/main/java/com/chasmet/superbot/BotAccessibilityService.java')
@@ -74,6 +74,14 @@ tasks.named('preBuild').configure {
         text = text.replace(
                 'private static boolean click(AccessibilityNodeInfo r,String...ls){',
                 'private boolean tapText(AccessibilityNodeInfo r,String...ls){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}\n  private static boolean click(AccessibilityNodeInfo r,String...ls){')
+
+        // Pont MCP : le serveur Render lit l'écran et envoie click/swipe/back au service Accessibility.
+        text = text.replace(
+                'public class BotAccessibilityService extends AccessibilityService {',
+                'public class BotAccessibilityService extends AccessibilityService {\n  private SuperBotRemoteBridge remoteBridge;\n  @Override protected void onServiceConnected(){super.onServiceConnected();if(remoteBridge==null){remoteBridge=new SuperBotRemoteBridge(this);remoteBridge.start();}}')
+        text = text.replace(
+                '@Override public void onDestroy(){h.removeCallbacksAndMessages(null);super.onDestroy();}',
+                '@Override public void onDestroy(){if(remoteBridge!=null){remoteBridge.stop();remoteBridge=null;}h.removeCallbacksAndMessages(null);super.onDestroy();}')
 
         source.write(text, 'UTF-8')
     }
