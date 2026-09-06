@@ -84,6 +84,16 @@ public class BotAccessibilityService extends AccessibilityService {
             return true;
         }
 
+        if (!getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getBoolean("meta_ok_" + task.id, false)) {
+            if (containsAny(root, "Date et heure de publication", "Date and time of publication")
+                    || state.equals("TIKTOK_MORE_OPTIONS") || state.equals("TIKTOK_MORE_OPTIONS_SCROLL")) {
+                performGlobalAction(GLOBAL_ACTION_BACK);
+                return mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — retour au texte de publication");
+            }
+            if (!ensureTikTokMetadata(root, task)) return true;
+            return mark(task, "TIKTOK_METADATA", "TIKTOK — titre, description et hashtags vérifiés");
+        }
+
         if (containsAny(root, "Date et heure de publication", "Date and time of publication")) {
             return adjustPicker(root, task);
         }
@@ -131,6 +141,60 @@ public class BotAccessibilityService extends AccessibilityService {
             return mark(task, state, "TIKTOK — NAVIGATION EN COURS");
         }
         return false;
+    }
+
+    private boolean ensureTikTokMetadata(AccessibilityNodeInfo root, PublicationTask task) {
+        String expected = PublicationAlarmReceiver.buildMetadata(task);
+        if (expected.trim().isEmpty()) {
+            getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putBoolean("meta_ok_" + task.id, true).apply();
+            return true;
+        }
+        List<AccessibilityNodeInfo> fields = new ArrayList<>();
+        collectEditable(root, fields);
+        try {
+            for (AccessibilityNodeInfo field : fields) {
+                if (!field.isVisibleToUser()) continue;
+                String d = descriptor(field);
+                if (!(d.contains("description") || d.contains("caption") || d.contains("légende")
+                        || d.contains("legende") || d.contains("édit") || fields.size() == 1)) continue;
+                if (field.getText() != null && expected.equals(field.getText().toString())) {
+                    getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putBoolean("meta_ok_" + task.id, true).apply();
+                    return true;
+                }
+                field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+                boolean set = setText(field, expected);
+                if (!set) {
+                    android.content.ClipboardManager clipboard = (android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Super Bot", expected));
+                        set = field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+                    }
+                }
+                mark(task, "TIKTOK_METADATA_PENDING", set ? "TIKTOK — texte envoyé, vérification en cours"
+                        : "TIKTOK — champ texte inaccessible");
+                return false;
+            }
+        } finally { recycle(fields); }
+        if (clickFirst(root, "Ajouter une description", "Add description", "Add a description")) {
+            mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — ouverture du champ texte");
+        } else if (clickFirst(root, "suivant", "next", "continuer")) {
+            mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — accès au texte de publication");
+        } else {
+            mark(task, "TIKTOK_METADATA_PENDING", "TIKTOK — texte non vérifié, programmation en attente");
+        }
+        return false;
+    }
+
+    private boolean swipeWheel(AccessibilityNodeInfo wheel, int direction) {
+        if (Build.VERSION.SDK_INT < 24) return false;
+        android.graphics.Rect box = new android.graphics.Rect(); wheel.getBoundsInScreen(box);
+        if (box.width() < 20 || box.height() < 40 || !wheel.isVisibleToUser()) return false;
+        float distance = Math.min(box.height() * 0.22f, 80 * getResources().getDisplayMetrics().density);
+        android.graphics.Path path = new android.graphics.Path();
+        path.moveTo(box.centerX(), box.centerY() + (direction >= 0 ? distance/2 : -distance/2));
+        path.lineTo(box.centerX(), box.centerY() + (direction >= 0 ? -distance/2 : distance/2));
+        return dispatchGesture(new android.accessibilityservice.GestureDescription.Builder()
+                .addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 300)).build(), null, null);
     }
 
     private boolean adjustPicker(AccessibilityNodeInfo root, PublicationTask task) {
@@ -194,6 +258,7 @@ public class BotAccessibilityService extends AccessibilityService {
                 if (!matches) {
                     boolean moved = wheels.get(i).performAction(direction >= 0
                             ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+                    if (!moved) moved = swipeWheel(wheels.get(i), direction);
                     return mark(task, "TIKTOK_PICKER_ADJUST", moved ? "TIKTOK — réglage des roues en cours"
                             : "TIKTOK — roue inaccessible, vérifier l'écran");
                 }
@@ -252,7 +317,8 @@ public class BotAccessibilityService extends AccessibilityService {
 
     private static void collectScrollable(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out) {
         if (node == null) return;
-        if (node.isScrollable()) out.add(AccessibilityNodeInfo.obtain(node));
+        if (node.isScrollable() || (node.getClassName() != null
+                && node.getClassName().toString().contains("NumberPicker"))) out.add(AccessibilityNodeInfo.obtain(node));
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
