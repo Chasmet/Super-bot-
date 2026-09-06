@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.IBinder;
 
@@ -26,8 +27,10 @@ import java.util.concurrent.TimeUnit;
 public final class McpConnectionService extends Service {
     private static final String CHANNEL_ID = "superbot_mcp";
     private static final int NOTIFICATION_ID = 4107;
-    private static final String BASE_URL = "https://asset-chk-mcp.onrender.com/superbot";
+    public static final String BASE_URL = "https://asset-chk-mcp.onrender.com/superbot";
+    public static final String MCP_URL = "https://asset-chk-mcp.onrender.com/superbot/mcp";
     private static final String DEVICE_ID = "superbot-phone";
+    private static final String PREFS = "superbot_mcp";
     private ScheduledExecutorService executor;
 
     public static void start(Context context) {
@@ -35,14 +38,39 @@ public final class McpConnectionService extends Service {
         try {
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
             else context.startService(intent);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            saveState(context, false, "Démarrage impossible : " + e.getMessage());
         }
+    }
+
+    public static boolean isConnected(Context context) {
+        SharedPreferences p = context.getSharedPreferences(PREFS, MODE_PRIVATE);
+        long lastOk = p.getLong("last_ok", 0L);
+        return p.getBoolean("connected", false) && System.currentTimeMillis() - lastOk < 20000L;
+    }
+
+    public static String statusText(Context context) {
+        SharedPreferences p = context.getSharedPreferences(PREFS, MODE_PRIVATE);
+        long lastOk = p.getLong("last_ok", 0L);
+        String error = p.getString("last_error", "");
+        if (isConnected(context)) return "MCP CONNECTÉ • Render répond";
+        if (lastOk > 0L) return "MCP DÉCONNECTÉ • dernière réponse il y a " + ((System.currentTimeMillis() - lastOk) / 1000L) + " s";
+        if (error != null && !error.isEmpty()) return "MCP DÉCONNECTÉ • " + error;
+        return "MCP DÉCONNECTÉ • aucune réponse reçue";
+    }
+
+    private static void saveState(Context context, boolean connected, String error) {
+        SharedPreferences.Editor e = context.getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean("connected", connected)
+                .putString("last_error", error == null ? "" : error);
+        if (connected) e.putLong("last_ok", System.currentTimeMillis());
+        e.apply();
     }
 
     @Override public void onCreate() {
         super.onCreate();
         createChannel();
-        startForeground(NOTIFICATION_ID, notification("Connexion MCP en cours…"));
+        startForeground(NOTIFICATION_ID, notification("Connexion MCP Render en cours…"));
         executor = Executors.newSingleThreadScheduledExecutor();
         executor.scheduleWithFixedDelay(this::heartbeat, 0, 5, TimeUnit.SECONDS);
     }
@@ -52,6 +80,7 @@ public final class McpConnectionService extends Service {
     }
 
     @Override public void onDestroy() {
+        saveState(this, false, "service arrêté");
         if (executor != null) executor.shutdownNow();
         super.onDestroy();
     }
@@ -70,8 +99,10 @@ public final class McpConnectionService extends Service {
             payload.put("androidSdk", Build.VERSION.SDK_INT);
             payload.put("bridgeMode", "mcp_persistent");
             postJson(BASE_URL + "/device/register", payload);
-            updateNotification("MCP connecté • " + version);
+            saveState(this, true, "");
+            updateNotification("MCP connecté à Render • " + version);
         } catch (Exception e) {
+            saveState(this, false, e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
             updateNotification("MCP hors ligne • nouvelle tentative automatique");
         }
     }
