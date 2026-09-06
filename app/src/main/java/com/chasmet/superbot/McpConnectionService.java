@@ -62,16 +62,26 @@ public final class McpConnectionService extends Service {
 
     private void heartbeat() {
         try {
+            String version = appVersion();
             JSONObject payload = new JSONObject();
             payload.put("deviceId", DEVICE_ID);
             payload.put("source", "android_foreground_service");
-            payload.put("appVersion", BuildConfig.VERSION_NAME);
+            payload.put("appVersion", version);
             payload.put("androidSdk", Build.VERSION.SDK_INT);
             payload.put("bridgeMode", "mcp_persistent");
             postJson(BASE_URL + "/device/register", payload);
-            updateNotification("MCP connecté • " + BuildConfig.VERSION_NAME);
+            updateNotification("MCP connecté • " + version);
         } catch (Exception e) {
             updateNotification("MCP hors ligne • nouvelle tentative automatique");
+        }
+    }
+
+    private String appVersion() {
+        try {
+            String version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            return version == null || version.trim().isEmpty() ? "inconnue" : version;
+        } catch (Exception e) {
+            return "inconnue";
         }
     }
 
