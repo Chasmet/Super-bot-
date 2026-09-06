@@ -2,6 +2,7 @@ package com.chasmet.superbot;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.annotation.SuppressLint;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Build;
@@ -17,6 +18,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
+@SuppressLint("NewApi")
 public class BotAccessibilityService extends AccessibilityService {
     private long lastActionAt;
     private final android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -26,29 +28,36 @@ public class BotAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (!isBotAwake()) return;
         if (event == null || event.getPackageName() == null) return;
-        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .getString("active_task_id", "");
+        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("active_task_id", "");
         if (taskId.isEmpty()) return;
         PublicationTask task = PublicationTaskRepository.find(this, taskId);
         if (task == null) return;
         String expected = PublicationAlarmReceiver.packageFor(task.platform);
         if (expected == null || !expected.equals(event.getPackageName().toString())) return;
-        if (System.currentTimeMillis() - lastActionAt < 500L) return;
+        if (System.currentTimeMillis() - lastActionAt < 450L) return;
         handler.removeCallbacks(retryRunnable);
         processTask(task);
-        handler.postDelayed(retryRunnable, 850L);
+        handler.postDelayed(retryRunnable, 800L);
+    }
+
+    private boolean isBotAwake() {
+        return getSharedPreferences("superbot_control", MODE_PRIVATE).getBoolean("bot_awake", true);
     }
 
     private void processCurrentWindow() {
-        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .getString("active_task_id", "");
+        if (!isBotAwake()) {
+            handler.removeCallbacks(retryRunnable);
+            return;
+        }
+        String taskId = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("active_task_id", "");
         if (taskId.isEmpty()) return;
         PublicationTask task = PublicationTaskRepository.find(this, taskId);
         if (task == null) return;
         processTask(task);
         handler.removeCallbacks(retryRunnable);
-        handler.postDelayed(retryRunnable, 850L);
+        handler.postDelayed(retryRunnable, 800L);
     }
 
     private void processTask(PublicationTask task) {
@@ -57,7 +66,7 @@ public class BotAccessibilityService extends AccessibilityService {
             retryCount = 0;
             clearPickerState(task.id);
         }
-        if (++retryCount > 300) {
+        if (++retryCount > 360) {
             mark(task, "TIKTOK_PAUSED", "TIKTOK — délai dépassé, vérifier l'écran");
             handler.removeCallbacks(retryRunnable);
             return;
@@ -90,29 +99,55 @@ public class BotAccessibilityService extends AccessibilityService {
             return;
         }
 
-        if (!getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .getBoolean("meta_ok_" + task.id, false)) {
-            if (!ensureTikTokMetadata(root, task)) return;
-            mark(task, "TIKTOK_METADATA", "TIKTOK — métadonnées vérifiées");
-            return;
-        }
-
-        if (containsAny(root, "Plus d’options", "Plus d'options", "More options")) {
-            if (clickFirst(root, "Plus d’options", "Plus d'options", "More options")) {
-                mark(task, "TIKTOK_MORE_OPTIONS", "TIKTOK — Plus d'options ouvert");
+        // Écran de montage TikTok : la vidéo montre qu'il faut d'abord appuyer sur Suivant.
+        // On le traite AVANT la recherche du champ de description, sinon le bot reste bloqué ici.
+        if (looksLikeTikTokEditor(root)) {
+            if (clickFirst(root, "Suivant", "Next")) {
+                mark(task, "TIKTOK_NEXT", "TIKTOK — Suivant appuyé automatiquement");
                 return;
             }
         }
 
-        if ("TIKTOK_MORE_OPTIONS".equals(state) || "TIKTOK_MORE_OPTIONS_SCROLL".equals(state)
-                || containsAny(root, "Programmer la publication", "Schedule post")) {
+        // Fenêtre Plus d'options : Programmer la publication est la priorité absolue.
+        if (containsAny(root, "Programmer la publication", "Schedule post")) {
+            if (clickScheduleControl(root)) {
+                clearPickerState(task.id);
+                mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — Programmer la publication ouvert");
+                return;
+            }
+        }
+
+        // Écran de publication : remplir puis relire le texte.
+        if (looksLikeTikTokPostScreen(root)) {
+            if (!getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                    .getBoolean("meta_ok_" + task.id, false)) {
+                if (!ensureTikTokMetadata(root, task)) return;
+                mark(task, "TIKTOK_METADATA", "TIKTOK — métadonnées vérifiées");
+                return;
+            }
+
+            // Plus d'options peut être tout en bas de la page.
+            if (containsAny(root, "Plus d’options", "Plus d'options", "More options")) {
+                if (clickFirst(root, "Plus d’options", "Plus d'options", "More options")) {
+                    mark(task, "TIKTOK_MORE_OPTIONS", "TIKTOK — Plus d'options ouvert automatiquement");
+                    return;
+                }
+            }
+
+            if (scrollForward(root) || swipePageUp(task)) {
+                mark(task, "TIKTOK_FIND_MORE_OPTIONS", "TIKTOK — défilement vers Plus d'options");
+                return;
+            }
+        }
+
+        if ("TIKTOK_MORE_OPTIONS".equals(state) || "TIKTOK_FIND_SCHEDULE".equals(state)) {
             if (clickScheduleControl(root)) {
                 clearPickerState(task.id);
                 mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — programmation ouverte");
                 return;
             }
-            if (scrollForward(root)) {
-                mark(task, "TIKTOK_MORE_OPTIONS_SCROLL", "TIKTOK — recherche de Programmer la publication");
+            if (scrollForward(root) || swipePageUp(task)) {
+                mark(task, "TIKTOK_FIND_SCHEDULE", "TIKTOK — recherche de Programmer la publication");
                 return;
             }
         }
@@ -125,15 +160,24 @@ public class BotAccessibilityService extends AccessibilityService {
         }
 
         if (clickFirst(root, "Suivant", "Next", "Continuer", "Continue")) {
-            mark(task, state, "TIKTOK — navigation en cours");
+            mark(task, "TIKTOK_NEXT", "TIKTOK — navigation en cours");
         }
+    }
+
+    private static boolean looksLikeTikTokEditor(AccessibilityNodeInfo root) {
+        return containsAny(root, "Ta Story", "Your Story") && containsAny(root, "Suivant", "Next");
+    }
+
+    private static boolean looksLikeTikTokPostScreen(AccessibilityNodeInfo root) {
+        return containsAny(root, "Publier", "Post", "Brouillons", "Drafts")
+                || containsAny(root, "Ajouter un lien", "Add link", "Paramètres de confidentialité", "Privacy settings")
+                || containsAny(root, "Plus d’options", "Plus d'options", "More options");
     }
 
     private boolean ensureTikTokMetadata(AccessibilityNodeInfo root, PublicationTask task) {
         String expected = PublicationAlarmReceiver.buildMetadata(task).trim();
         if (expected.isEmpty()) {
-            getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                    .putBoolean("meta_ok_" + task.id, true).apply();
+            getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putBoolean("meta_ok_" + task.id, true).apply();
             return true;
         }
         List<AccessibilityNodeInfo> fields = new ArrayList<>();
@@ -143,26 +187,22 @@ public class BotAccessibilityService extends AccessibilityService {
                 if (!field.isVisibleToUser()) continue;
                 String current = field.getText() == null ? "" : field.getText().toString().trim();
                 if (expected.equals(current)) {
-                    getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                            .putBoolean("meta_ok_" + task.id, true).apply();
+                    getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putBoolean("meta_ok_" + task.id, true).apply();
                     return true;
                 }
                 String descriptor = descriptor(field);
                 if (!(descriptor.contains("description") || descriptor.contains("caption")
-                        || descriptor.contains("légende") || descriptor.contains("legende")
-                        || fields.size() == 1)) continue;
+                        || descriptor.contains("légende") || descriptor.contains("legende") || fields.size() == 1)) continue;
                 field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
                 boolean ok = setText(field, expected);
                 if (!ok) {
-                    android.content.ClipboardManager cb = (android.content.ClipboardManager)
-                            getSystemService(CLIPBOARD_SERVICE);
+                    android.content.ClipboardManager cb = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                     if (cb != null) {
                         cb.setPrimaryClip(android.content.ClipData.newPlainText("Super Bot", expected));
                         ok = field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
                     }
                 }
-                mark(task, "TIKTOK_METADATA_PENDING",
-                        ok ? "TIKTOK — métadonnées envoyées" : "TIKTOK — champ métadonnées inaccessible");
+                mark(task, "TIKTOK_METADATA_PENDING", ok ? "TIKTOK — texte complet envoyé" : "TIKTOK — champ texte inaccessible");
                 return false;
             }
         } finally {
@@ -187,16 +227,14 @@ public class BotAccessibilityService extends AccessibilityService {
         Rect screen = new Rect();
         root.getBoundsInScreen(screen);
         if (screen.width() <= 0 || screen.height() <= 0) return;
-
         PickerColumns columns = readPickerColumns(root, screen);
         if (!columns.ready()) {
-            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture visuelle des roues en cours");
+            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — lecture des trois roues en cours");
             return;
         }
 
         Calendar target = Calendar.getInstance();
         target.setTimeInMillis(task.scheduledAt);
-
         Calendar currentDate = parseVisibleDate(columns.date.value);
         if (currentDate == null) {
             mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — date centrale non reconnue");
@@ -210,39 +248,29 @@ public class BotAccessibilityService extends AccessibilityService {
         }
 
         Integer currentHour = parseNumber(columns.hour.value);
-        if (currentHour == null) {
-            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — heure centrale non reconnue");
-            return;
-        }
+        if (currentHour == null) return;
         int wantedHour = target.get(Calendar.HOUR_OF_DAY);
         if (currentHour != wantedHour) {
-            int direction = shortestCircularDirection(currentHour, wantedHour, 24);
             resetVerify(task.id);
-            dispatchWheelGesture(columns.hour, direction, task,
+            dispatchWheelGesture(columns.hour, shortestCircularDirection(currentHour, wantedHour, 24), task,
                     "heure vers " + String.format(Locale.FRANCE, "%02d", wantedHour));
             return;
         }
 
         Integer currentMinute = parseNumber(columns.minute.value);
-        if (currentMinute == null) {
-            mark(task, "TIKTOK_PICKER_WAIT", "TIKTOK — minutes centrales non reconnues");
-            return;
-        }
+        if (currentMinute == null) return;
         int wantedMinute = target.get(Calendar.MINUTE);
         if (currentMinute != wantedMinute) {
-            int direction = shortestCircularDirection(currentMinute, wantedMinute, 60);
             resetVerify(task.id);
-            dispatchWheelGesture(columns.minute, direction, task,
+            dispatchWheelGesture(columns.minute, shortestCircularDirection(currentMinute, wantedMinute, 60), task,
                     "minutes vers " + String.format(Locale.FRANCE, "%02d", wantedMinute));
             return;
         }
 
-        int verified = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .getInt("picker_verified_" + task.id, 0) + 1;
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                .putInt("picker_verified_" + task.id, verified).apply();
+        int verified = getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getInt("picker_verified_" + task.id, 0) + 1;
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putInt("picker_verified_" + task.id, verified).apply();
         if (verified < 2) {
-            mark(task, "TIKTOK_PICKER_VERIFY", "TIKTOK — contrôle final date/heure");
+            mark(task, "TIKTOK_PICKER_VERIFY", "TIKTOK — double contrôle date/heure/minutes");
             return;
         }
         if (clickFirst(root, "Terminé", "Done")) {
@@ -264,25 +292,19 @@ public class BotAccessibilityService extends AccessibilityService {
                 node.getBoundsInScreen(b);
                 if (b.isEmpty()) continue;
                 float x = b.centerX() / (float) screen.width();
-                if (isDateLabel(text) && x < 0.55f) {
-                    dates.add(new PickerLabel(text, b.centerX(), b.centerY()));
-                } else if (text.matches("[0-9]{1,2}")) {
+                if (isDateLabel(text) && x < 0.55f) dates.add(new PickerLabel(text, b.centerX(), b.centerY()));
+                else if (text.matches("[0-9]{1,2}")) {
                     if (x >= 0.43f && x < 0.72f) hours.add(new PickerLabel(text, b.centerX(), b.centerY()));
                     else if (x >= 0.72f) minutes.add(new PickerLabel(text, b.centerX(), b.centerY()));
                 }
             }
-        } finally {
-            recycle(labels);
-        }
-        return new PickerColumns(centerLabel(dates), centerLabel(hours), centerLabel(minutes),
-                spacing(dates), spacing(hours), spacing(minutes));
+        } finally { recycle(labels); }
+        return new PickerColumns(centerLabel(dates), centerLabel(hours), centerLabel(minutes), spacing(dates), spacing(hours), spacing(minutes));
     }
 
     private static void sortPickerLabels(List<PickerLabel> values) {
         Collections.sort(values, new java.util.Comparator<PickerLabel>() {
-            @Override public int compare(PickerLabel a, PickerLabel b) {
-                return a.y < b.y ? -1 : (a.y == b.y ? 0 : 1);
-            }
+            @Override public int compare(PickerLabel a, PickerLabel b) { return a.y < b.y ? -1 : (a.y == b.y ? 0 : 1); }
         });
     }
 
@@ -306,6 +328,7 @@ public class BotAccessibilityService extends AccessibilityService {
     }
 
     private void dispatchWheelGesture(PickerLabel label, int direction, PublicationTask task, String what) {
+        if (Build.VERSION.SDK_INT < 24) return;
         float distance = Math.max(34f * getResources().getDisplayMetrics().density, label.spacing * 1.25f);
         distance = Math.min(distance, 120f * getResources().getDisplayMetrics().density);
         float startY = label.y + (direction > 0 ? distance * 0.55f : -distance * 0.55f);
@@ -313,22 +336,28 @@ public class BotAccessibilityService extends AccessibilityService {
         Path path = new Path();
         path.moveTo(label.x, startY);
         path.lineTo(label.x, endY);
-        GestureDescription gesture = new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, 480)).build();
+        GestureDescription gesture = new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(path, 0, 480)).build();
         boolean accepted = dispatchGesture(gesture, new GestureResultCallback() {
-            @Override public void onCompleted(GestureDescription gestureDescription) {
-                handler.removeCallbacks(retryRunnable);
-                handler.postDelayed(retryRunnable, 650L);
-            }
-            @Override public void onCancelled(GestureDescription gestureDescription) {
-                handler.removeCallbacks(retryRunnable);
-                handler.postDelayed(retryRunnable, 650L);
-            }
+            @Override public void onCompleted(GestureDescription g) { handler.removeCallbacks(retryRunnable); handler.postDelayed(retryRunnable, 650L); }
+            @Override public void onCancelled(GestureDescription g) { handler.removeCallbacks(retryRunnable); handler.postDelayed(retryRunnable, 650L); }
         }, null);
         lastActionAt = System.currentTimeMillis();
-        mark(task, "TIKTOK_PICKER_GESTURE", accepted
-                ? "TIKTOK — défilement tactile " + what
-                : "TIKTOK — geste tactile refusé pour " + what);
+        mark(task, "TIKTOK_PICKER_GESTURE", accepted ? "TIKTOK — défilement tactile " + what : "TIKTOK — geste refusé " + what);
+    }
+
+    private boolean swipePageUp(PublicationTask task) {
+        if (Build.VERSION.SDK_INT < 24) return false;
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        float x = dm.widthPixels * 0.50f;
+        float startY = dm.heightPixels * 0.78f;
+        float endY = dm.heightPixels * 0.38f;
+        Path p = new Path();
+        p.moveTo(x, startY);
+        p.lineTo(x, endY);
+        GestureDescription g = new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(p, 0, 420)).build();
+        boolean ok = dispatchGesture(g, null, null);
+        if (ok) lastActionAt = System.currentTimeMillis();
+        return ok;
     }
 
     private static int shortestCircularDirection(int current, int target, int modulo) {
@@ -341,8 +370,7 @@ public class BotAccessibilityService extends AccessibilityService {
         if (value == null) return null;
         String only = value.replaceAll("[^0-9]", "");
         if (only.isEmpty()) return null;
-        try { return Integer.parseInt(only); }
-        catch (NumberFormatException e) { return null; }
+        try { return Integer.parseInt(only); } catch (NumberFormatException e) { return null; }
     }
 
     private static boolean isDateLabel(String text) {
@@ -368,44 +396,28 @@ public class BotAccessibilityService extends AccessibilityService {
 
     private static String normalizeDate(String text) {
         return text.toLowerCase(Locale.FRANCE).replace(".", "").replace("’", "'")
-                .replace("é", "e").replace("è", "e").replace("ê", "e")
-                .replace("û", "u").replace("ù", "u").replace("ô", "o")
-                .replace("î", "i").replace("ï", "i").replace("à", "a").trim();
+                .replace("é", "e").replace("è", "e").replace("ê", "e").replace("û", "u")
+                .replace("ù", "u").replace("ô", "o").replace("î", "i").replace("ï", "i").replace("à", "a").trim();
     }
 
     private static boolean dateLabelMatches(String normalized, Calendar date) {
         String day = String.valueOf(date.get(Calendar.DAY_OF_MONTH));
-        String month = new SimpleDateFormat("MMM", Locale.FRANCE).format(date.getTime());
-        month = normalizeDate(month);
-        return normalized.contains(month)
-                && java.util.regex.Pattern.compile("(?<![0-9])" + day + "(?![0-9])")
-                .matcher(normalized).find();
+        String month = normalizeDate(new SimpleDateFormat("MMM", Locale.FRANCE).format(date.getTime()));
+        return normalized.contains(month) && java.util.regex.Pattern.compile("(?<![0-9])" + day + "(?![0-9])").matcher(normalized).find();
     }
 
     private static boolean sameDay(Calendar a, Calendar b) {
-        return a.get(Calendar.YEAR) == b.get(Calendar.YEAR)
-                && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR);
+        return a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR);
     }
 
     private static void zeroTime(Calendar c) {
-        c.set(Calendar.HOUR_OF_DAY, 0);
-        c.set(Calendar.MINUTE, 0);
-        c.set(Calendar.SECOND, 0);
-        c.set(Calendar.MILLISECOND, 0);
+        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0);
     }
 
-    private static String formatDate(Calendar c) {
-        return new SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(c.getTime());
-    }
+    private static String formatDate(Calendar c) { return new SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(c.getTime()); }
 
-    private void resetVerify(String taskId) {
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                .remove("picker_verified_" + taskId).apply();
-    }
-
-    private void clearPickerState(String taskId) {
-        resetVerify(taskId);
-    }
+    private void resetVerify(String taskId) { getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().remove("picker_verified_" + taskId).apply(); }
+    private void clearPickerState(String taskId) { resetVerify(taskId); }
 
     private boolean clickScheduleControl(AccessibilityNodeInfo root) {
         return clickFirst(root, "Programmer la publication", "Programmer", "Schedule post", "Schedule");
@@ -426,21 +438,11 @@ public class BotAccessibilityService extends AccessibilityService {
     }
 
     private void runGeneric(AccessibilityNodeInfo root, PublicationTask task) {
-        if (containsAny(root, "publié", "published", "upload complete")) {
-            finish(task, "PUBLIÉ");
-            return;
-        }
-        if (fillMetadata(root, task)) {
-            mark(task, getState(task.id), "MÉTADONNÉES REMPLIES");
-            return;
-        }
-        if (clickFirst(root, "Suivant", "Next", "Continuer", "Continue")) {
-            mark(task, getState(task.id), "NAVIGATION EN COURS");
-            return;
-        }
-        if (clickFirst(root, "Publier", "Post", "Mettre en ligne", "Upload")) {
-            mark(task, getState(task.id), "VALIDATION ENVOYÉE");
-        }
+        if (!isBotAwake()) return;
+        if (containsAny(root, "publié", "published", "upload complete")) { finish(task, "PUBLIÉ"); return; }
+        if (fillMetadata(root, task)) { mark(task, getState(task.id), "MÉTADONNÉES REMPLIES"); return; }
+        if (clickFirst(root, "Suivant", "Next", "Continuer", "Continue")) { mark(task, getState(task.id), "NAVIGATION EN COURS"); return; }
+        if (clickFirst(root, "Publier", "Post", "Mettre en ligne", "Upload")) mark(task, getState(task.id), "VALIDATION ENVOYÉE");
     }
 
     private boolean fillMetadata(AccessibilityNodeInfo root, PublicationTask task) {
@@ -457,16 +459,12 @@ public class BotAccessibilityService extends AccessibilityService {
                 String descriptor = descriptor(node);
                 String value = null;
                 if (descriptor.contains("title") || descriptor.contains("titre")) value = safe(task.title);
-                else if (descriptor.contains("description") || descriptor.contains("caption")
-                        || descriptor.contains("légende") || descriptor.contains("legende"))
-                    value = joined(task.description, task.hashtags);
+                else if (descriptor.contains("description") || descriptor.contains("caption") || descriptor.contains("légende") || descriptor.contains("legende")) value = joined(task.description, task.hashtags);
                 else if (descriptor.contains("hashtag")) value = safe(task.hashtags);
                 else if (editable.size() == 1) value = combined;
                 if (!TextUtils.isEmpty(value) && setText(node, value)) changed = true;
             }
-        } finally {
-            recycle(editable);
-        }
+        } finally { recycle(editable); }
         return changed;
     }
 
@@ -475,10 +473,7 @@ public class BotAccessibilityService extends AccessibilityService {
         if (node.isEditable()) out.add(AccessibilityNodeInfo.obtain(node));
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) {
-                collectEditable(child, out);
-                child.recycle();
-            }
+            if (child != null) { collectEditable(child, out); child.recycle(); }
         }
     }
 
@@ -487,10 +482,7 @@ public class BotAccessibilityService extends AccessibilityService {
         if (node.getText() != null && node.getChildCount() == 0) out.add(AccessibilityNodeInfo.obtain(node));
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) {
-                collectLabels(child, out);
-                child.recycle();
-            }
+            if (child != null) { collectLabels(child, out); child.recycle(); }
         }
     }
 
@@ -513,11 +505,8 @@ public class BotAccessibilityService extends AccessibilityService {
         for (String label : labels) {
             List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
             if (nodes == null) continue;
-            try {
-                for (AccessibilityNodeInfo node : nodes) if (clickNode(node)) return true;
-            } finally {
-                recycle(nodes);
-            }
+            try { for (AccessibilityNodeInfo node : nodes) if (clickNode(node)) return true; }
+            finally { recycle(nodes); }
         }
         return false;
     }
@@ -532,9 +521,7 @@ public class BotAccessibilityService extends AccessibilityService {
                 current = parent;
             }
             return false;
-        } finally {
-            if (current != null) current.recycle();
-        }
+        } finally { if (current != null) current.recycle(); }
     }
 
     private static boolean containsAny(AccessibilityNodeInfo root, String... labels) {
@@ -548,75 +535,42 @@ public class BotAccessibilityService extends AccessibilityService {
     }
 
     private boolean mark(PublicationTask task, String state, String status) {
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                .putString("state_" + task.id, state).apply();
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().putString("state_" + task.id, state).apply();
         task.status = status;
         PublicationTaskRepository.save(this, task);
         lastActionAt = System.currentTimeMillis();
         return true;
     }
 
-    private String getState(String taskId) {
-        return getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
-                .getString("state_" + taskId, "");
-    }
+    private String getState(String taskId) { return getSharedPreferences("superbot_bot_state", MODE_PRIVATE).getString("state_" + taskId, ""); }
 
     private void finish(PublicationTask task, String status) {
         task.status = status;
         PublicationTaskRepository.save(this, task);
-        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit()
-                .remove("active_task_id").remove("state_" + task.id)
+        getSharedPreferences("superbot_bot_state", MODE_PRIVATE).edit().remove("active_task_id").remove("state_" + task.id)
                 .remove("picker_verified_" + task.id).remove("meta_ok_" + task.id).apply();
         handler.removeCallbacks(retryRunnable);
     }
 
-    private static boolean isTikTok(PublicationTask task) {
-        return task.platform != null && task.platform.toLowerCase(Locale.ROOT).contains("tiktok");
-    }
-
+    private static boolean isTikTok(PublicationTask task) { return task.platform != null && task.platform.toLowerCase(Locale.ROOT).contains("tiktok"); }
     private static String safe(String value) { return value == null ? "" : value.trim(); }
-
-    private static String joined(String a, String b) {
-        String x = safe(a), y = safe(b);
-        if (x.isEmpty()) return y;
-        if (y.isEmpty()) return x;
-        return x + "\n\n" + y;
-    }
-
-    private static void recycle(List<AccessibilityNodeInfo> nodes) {
-        if (nodes == null) return;
-        for (AccessibilityNodeInfo node : nodes) if (node != null) node.recycle();
-    }
+    private static String joined(String a, String b) { String x = safe(a), y = safe(b); if (x.isEmpty()) return y; if (y.isEmpty()) return x; return x + "\n\n" + y; }
+    private static void recycle(List<AccessibilityNodeInfo> nodes) { if (nodes == null) return; for (AccessibilityNodeInfo node : nodes) if (node != null) node.recycle(); }
 
     private static final class PickerLabel {
-        final String value;
-        final float x;
-        final int y;
-        float spacing = 42f;
+        final String value; final float x; final int y; float spacing = 42f;
         PickerLabel(String value, float x, int y) { this.value = value; this.x = x; this.y = y; }
     }
 
     private static final class PickerColumns {
-        final PickerLabel date;
-        final PickerLabel hour;
-        final PickerLabel minute;
-        PickerColumns(PickerLabel date, PickerLabel hour, PickerLabel minute,
-                      float dateSpacing, float hourSpacing, float minuteSpacing) {
-            this.date = date;
-            this.hour = hour;
-            this.minute = minute;
-            if (date != null) date.spacing = dateSpacing;
-            if (hour != null) hour.spacing = hourSpacing;
-            if (minute != null) minute.spacing = minuteSpacing;
+        final PickerLabel date, hour, minute;
+        PickerColumns(PickerLabel date, PickerLabel hour, PickerLabel minute, float ds, float hs, float ms) {
+            this.date = date; this.hour = hour; this.minute = minute;
+            if (date != null) date.spacing = ds; if (hour != null) hour.spacing = hs; if (minute != null) minute.spacing = ms;
         }
         boolean ready() { return date != null && hour != null && minute != null; }
     }
 
     @Override public void onInterrupt() {}
-
-    @Override
-    public void onDestroy() {
-        handler.removeCallbacksAndMessages(null);
-        super.onDestroy();
-    }
+    @Override public void onDestroy() { handler.removeCallbacksAndMessages(null); super.onDestroy(); }
 }
