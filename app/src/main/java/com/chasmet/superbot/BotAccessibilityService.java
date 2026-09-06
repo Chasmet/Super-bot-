@@ -14,7 +14,6 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
@@ -175,12 +174,6 @@ public class BotAccessibilityService extends AccessibilityService {
         return false;
     }
 
-    /**
-     * TikTok dessine ses trois roues avec des vues qui ne sont pas toujours déclarées
-     * scrollables à AccessibilityService. On ne dépend donc plus de isScrollable().
-     * On lit les libellés visibles des trois colonnes et on envoie un vrai geste tactile
-     * dans la colonne concernée, comme le ferait le doigt de l'utilisateur.
-     */
     private void adjustTikTokPicker(AccessibilityNodeInfo root, PublicationTask task) {
         if (Build.VERSION.SDK_INT < 24) {
             mark(task, "TIKTOK_PAUSED", "TIKTOK — Android trop ancien pour piloter les roues");
@@ -212,8 +205,7 @@ public class BotAccessibilityService extends AccessibilityService {
         if (!sameDay(currentDate, target)) {
             int direction = target.after(currentDate) ? 1 : -1;
             resetVerify(task.id);
-            dispatchWheelGesture(columns.date, direction, task,
-                    "date vers " + formatDate(target));
+            dispatchWheelGesture(columns.date, direction, task, "date vers " + formatDate(target));
             return;
         }
 
@@ -286,15 +278,23 @@ public class BotAccessibilityService extends AccessibilityService {
                 spacing(dates), spacing(hours), spacing(minutes));
     }
 
+    private static void sortPickerLabels(List<PickerLabel> values) {
+        Collections.sort(values, new java.util.Comparator<PickerLabel>() {
+            @Override public int compare(PickerLabel a, PickerLabel b) {
+                return a.y < b.y ? -1 : (a.y == b.y ? 0 : 1);
+            }
+        });
+    }
+
     private static PickerLabel centerLabel(List<PickerLabel> values) {
         if (values.isEmpty()) return null;
-        Collections.sort(values, Comparator.comparingInt(a -> a.y));
+        sortPickerLabels(values);
         return values.get(values.size() / 2);
     }
 
     private static float spacing(List<PickerLabel> values) {
         if (values.size() < 2) return 42f;
-        Collections.sort(values, Comparator.comparingInt(a -> a.y));
+        sortPickerLabels(values);
         List<Integer> diffs = new ArrayList<>();
         for (int i = 1; i < values.size(); i++) {
             int d = values.get(i).y - values.get(i - 1).y;
