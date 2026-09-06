@@ -120,9 +120,6 @@ public class BotAccessibilityService extends AccessibilityService {
             return mark(task, "TIKTOK_SCHEDULE_OPEN", "TIKTOK — PROGRAMMATION OUVERTE");
         }
 
-        if (state.equals("TIKTOK_SCHEDULE_READY") && containsAny(root, "Plus d'options", "Plus d’options", "More options")) {
-            if (performGlobalAction(GLOBAL_ACTION_BACK)) { lastActionAt = System.currentTimeMillis(); return true; }
-        }
         if (state.equals("TIKTOK_SCHEDULE_READY") && clickFirst(root, "publier", "post")) {
             return mark(task, "TIKTOK_CONFIRMING", "TIKTOK — VALIDATION DE LA PROGRAMMATION");
         }
