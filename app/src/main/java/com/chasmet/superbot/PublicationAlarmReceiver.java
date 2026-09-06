@@ -20,7 +20,29 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
         dispatchNow(context, task);
     }
 
+    public static boolean isSuperBotAwake(Context context) {
+        return context.getSharedPreferences("superbot_runtime", Context.MODE_PRIVATE)
+                .getBoolean("awake", true);
+    }
+
+    public static void setSuperBotAwake(Context context, boolean awake) {
+        context.getSharedPreferences("superbot_runtime", Context.MODE_PRIVATE)
+                .edit().putBoolean("awake", awake).apply();
+        if (!awake) {
+            context.getSharedPreferences("superbot_bot_state", Context.MODE_PRIVATE)
+                    .edit().remove("active_task_id").apply();
+        }
+    }
+
     public static boolean dispatchNow(Context context, PublicationTask task) {
+        if (!isSuperBotAwake(context)) {
+            task.status = "EN VEILLE • Super Bot déconnecté";
+            PublicationTaskRepository.save(context, task);
+            context.getSharedPreferences("superbot_bot_state", Context.MODE_PRIVATE)
+                    .edit().remove("active_task_id").apply();
+            return false;
+        }
+
         File video = new File(task.videoPath == null ? "" : task.videoPath);
         if (!video.exists()) {
             task.status = "ERREUR • vidéo introuvable";
