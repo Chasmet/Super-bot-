@@ -10,8 +10,8 @@ android {
         applicationId 'com.chasmet.superbot'
         minSdk 21
         targetSdk 34
-        versionCode 32
-        versionName '1.3.19'
+        versionCode 33
+        versionName '1.3.20'
     }
 
     signingConfigs {
@@ -45,6 +45,14 @@ tasks.named('preBuild').configure {
         def source = file('src/main/java/com/chasmet/superbot/BotAccessibilityService.java')
         def text = source.getText('UTF-8')
 
+        // Accepte les deux packages TikTok connus, ainsi que les variantes prévues pour les autres réseaux.
+        text = text.replace(
+                'String pkg=PublicationAlarmReceiver.packageFor(t.platform);\n    if(pkg==null||!pkg.equals(e.getPackageName().toString())||System.currentTimeMillis()-last<430)return;',
+                'if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,e.getPackageName())||System.currentTimeMillis()-last<430)return;')
+        text = text.replace(
+                'String pkg=PublicationAlarmReceiver.packageFor(t.platform);\n      if(r.getPackageName()==null||pkg==null||!pkg.equals(r.getPackageName().toString()))return;',
+                'if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,r.getPackageName()))return;')
+
         // Roue des minutes selon le cheminement observé sur TikTok.
         text = text.replace(
                 'wheel(r,c.m,dir(minute,wm,60),t,"minutes → "+two(wm))',
@@ -56,6 +64,11 @@ tasks.named('preBuild').configure {
                 '.putInt(k+"md",dir(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60))',
                 '.putInt(k+"md",target.get(Calendar.MINUTE)<=30?-1:1)')
 
+        // Confirmation finale : ne considérer la mission comme terminée qu'après un retour explicite de TikTok.
+        text = text.replace(
+                'if("TIKTOK_CONFIRMING".equals(s)&&has(r,"publication programmée","post scheduled","scheduled")){finish(t,"PROGRAMMÉ");return;}',
+                'if("TIKTOK_CONFIRMING".equals(s)&&TikTokScheduleVerifier.accepted(r)){finish(t,"PROGRAMMÉ");return;}')
+
         // Si le bouton Terminé est affiché après validation des roues, le bot doit le valider,
         // même si TikTok n'expose pas correctement un parent cliquable dans l'arbre Accessibility.
         text = text.replace(
@@ -63,12 +76,13 @@ tasks.named('preBuild').configure {
                 'if("TIKTOK_SCHEDULE_READY".equals(s)&&has(r,"Date et heure de publication","Date and time of publication")){if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — Terminé validé");}return;} if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}')
         text = text.replace(
                 'if(click(r,"Terminé","Done"))mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées");return;',
-                'if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées, Terminé");h.removeCallbacks(retry);h.postDelayed(retry,900);}else{mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — valeurs correctes, recherche Terminé");}return;')
+                'if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — jour, heure et minutes validés • Terminé");h.removeCallbacks(retry);h.postDelayed(retry,900);}else{mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — valeurs correctes, recherche Terminé");}return;')
 
-        // Après Terminé : fermer Plus d'options, revenir à l'écran principal puis Publier.
+        // Parcours complet après Terminé : vérifier la programmation, fermer Plus d'options,
+        // revenir au formulaire principal, vérifier encore date/heure, puis seulement appuyer sur Publier.
         text = text.replace(
-                'if(click(r,"Publier","Post")){\n        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");\n        return;\n      }',
-                'if(click(r,"Publier","Post")||tapText(r,"Publier","Post")){\n        mark(t,"TIKTOK_CONFIRMING","TIKTOK — Publier validé, programmation envoyée");\n        return;\n      }\n      if("TIKTOK_RETURN_POST".equals(s)){scroll(r);}')
+                'if("TIKTOK_SCHEDULE_READY".equals(s)||"TIKTOK_RETURN_POST".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){\n          mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour vers l\'écran Publier");\n          return;\n        }\n      }\n      if(click(r,"Publier","Post")){\n        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");\n        return;\n      }\n      return;\n    }',
+                'if("TIKTOK_SCHEDULE_READY".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){mark(t,"TIKTOK_PAUSED","TIKTOK — date/heure non vérifiées après Terminé");return;}\n        mark(t,"TIKTOK_SCHEDULE_VERIFIED","TIKTOK — programmation active et date/heure vérifiées");return;\n      }\n      return;\n    }\n    if("TIKTOK_SCHEDULE_VERIFIED".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){mark(t,"TIKTOK_RETURN_POST","TIKTOK — panneau fermé, retour vers Publier");return;}\n        return;\n      }\n      mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour formulaire principal");return;\n    }\n    if("TIKTOK_RETURN_POST".equals(s)){\n      if(!has(r,"Publier","Post"))return;\n      if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){mark(t,"TIKTOK_PAUSED","TIKTOK — date/heure non vérifiées avant Publier");return;}\n      if(click(r,"Publier","Post")||tapText(r,"Publier","Post")){mark(t,"TIKTOK_CONFIRMING","TIKTOK — Publier validé, attente confirmation TikTok");return;}\n      return;\n    }')
 
         // Secours tactile : toucher le centre du libellé lu à l'écran quand ACTION_CLICK est refusé.
         text = text.replace(
