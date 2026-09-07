@@ -5,7 +5,10 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.View;
+import android.widget.TextView;
 import android.widget.Toast;
+
+import java.util.List;
 
 public class MainActivity extends Activity {
 
@@ -29,6 +32,50 @@ public class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         McpConnectionService.start(this);
+        refreshBotChef();
+    }
+
+    private void refreshBotChef() {
+        TextView summary = findViewById(R.id.textBotChefSummary);
+        TextView detail = findViewById(R.id.textBotChefDetail);
+        if (summary == null || detail == null) return;
+
+        List<PublicationTask> tasks = PublicationTaskRepository.load(this);
+        int pending = 0;
+        int errors = 0;
+        String lastError = "";
+
+        for (int i = tasks.size() - 1; i >= 0; i--) {
+            PublicationTask task = tasks.get(i);
+            String status = task.status == null ? "" : task.status.trim();
+            String upper = status.toUpperCase();
+            boolean error = upper.contains("ERREUR") || upper.contains("FAILED") || upper.contains("INTRouvable".toUpperCase());
+            boolean done = upper.contains("PROGRAMMATION ENVOYÉE") || upper.contains("PUBLIÉ") || upper.contains("TERMINÉ");
+            if (error) {
+                errors++;
+                if (lastError.isEmpty()) lastError = status;
+            } else if (!done) {
+                pending++;
+            }
+        }
+
+        String dispatchError = getSharedPreferences("superbot_bot_state", MODE_PRIVATE)
+                .getString("last_dispatch_error", "");
+        if (dispatchError != null && !dispatchError.trim().isEmpty() && lastError.isEmpty()) {
+            lastError = "ERREUR DISPATCH • " + dispatchError.trim();
+            errors = Math.max(errors, 1);
+        }
+
+        summary.setText(pending + " publication" + (pending > 1 ? "s" : "")
+                + " en attente • " + errors + " erreur" + (errors > 1 ? "s" : ""));
+
+        if (errors > 0) {
+            detail.setVisibility(View.VISIBLE);
+            detail.setText(lastError);
+        } else {
+            detail.setVisibility(View.GONE);
+            detail.setText("");
+        }
     }
 
     private void bindBot(int id, String name) {
