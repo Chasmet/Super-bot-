@@ -75,12 +75,22 @@
                 android:textStyle="bold" />
 
             <TextView
+                android:id="@+id/textBotChefSummary"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:text="0 publication en attente • 0 erreur"
                 android:textColor="#9FB0D0"
                 android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/textBotChefDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="#FFB4AB"
+                android:textSize="12sp"
+                android:visibility="gone" />
         </LinearLayout>
 
         <TextView
