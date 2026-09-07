@@ -36,9 +36,14 @@ public final class RemotePublicationMission {
             }
 
             boolean started = PublicationAlarmReceiver.dispatchNow(context, task);
-            return new Result(started,
-                    started ? "publication_dispatched:" + task.id + ":" + task.platform
-                            : "publication_dispatch_failed:" + task.id);
+            if (started) {
+                return new Result(true, "publication_dispatched:" + task.id + ":" + task.platform);
+            }
+
+            PublicationTask latest = PublicationTaskRepository.find(context, task.id);
+            String status = latest == null ? task.status : latest.status;
+            if (status == null || status.trim().isEmpty()) status = "dispatch_failed";
+            return new Result(false, "publication_dispatch_failed:" + task.id + ":" + status);
         } catch (Exception e) {
             return new Result(false, e.getClass().getSimpleName() + ":" + e.getMessage());
         }
