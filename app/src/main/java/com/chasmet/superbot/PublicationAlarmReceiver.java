@@ -79,6 +79,8 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
                     context.startActivity(share);
                     task.status = "BOT OUVERT • " + pkg;
                     PublicationTaskRepository.save(context, task);
+                    context.getSharedPreferences("superbot_bot_state", Context.MODE_PRIVATE)
+                            .edit().remove("last_dispatch_error").apply();
                     return true;
                 } catch (Exception e) {
                     last = e;
