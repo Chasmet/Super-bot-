@@ -35,15 +35,8 @@ public final class RemotePublicationMission {
                 return new Result(false, "media_not_found:" + task.id);
             }
 
-            boolean started = PublicationAlarmReceiver.dispatchNow(context, task);
-            if (started) {
-                return new Result(true, "publication_dispatched:" + task.id + ":" + task.platform);
-            }
-
-            PublicationTask latest = PublicationTaskRepository.find(context, task.id);
-            String status = latest == null ? task.status : latest.status;
-            if (status == null || status.trim().isEmpty()) status = "dispatch_failed";
-            return new Result(false, "publication_dispatch_failed:" + task.id + ":" + status);
+            PublicationQueueCoordinator.EnqueueResult queued = PublicationQueueCoordinator.enqueue(context, task);
+            return new Result(queued.ok, queued.message);
         } catch (Exception e) {
             return new Result(false, e.getClass().getSimpleName() + ":" + e.getMessage());
         }
