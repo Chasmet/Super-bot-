@@ -14,6 +14,9 @@ import java.util.*;
 
 @SuppressLint("NewApi")
 public class BotAccessibilityService extends AccessibilityService {
+  private SuperBotRemoteBridge remoteBridge;
+  private void ensureRemoteBridge(){if(remoteBridge==null){remoteBridge=new SuperBotRemoteBridge(this);remoteBridge.start();}}
+  @Override protected void onServiceConnected(){super.onServiceConnected();ensureRemoteBridge();h.post(retry);}
   private long last; private int tries; private String active="";
   private final android.os.Handler h=new android.os.Handler(android.os.Looper.getMainLooper());
   private final Runnable retry=this::tick;
@@ -21,52 +24,77 @@ public class BotAccessibilityService extends AccessibilityService {
   private boolean awake(){return PublicationAlarmReceiver.isSuperBotAwake(this);}
 
   @Override public void onAccessibilityEvent(AccessibilityEvent e){
+    ensureRemoteBridge();
     if(!awake()||e==null||e.getPackageName()==null)return;
     String id=p().getString("active_task_id",""); if(id.isEmpty())return;
     PublicationTask t=PublicationTaskRepository.find(this,id); if(t==null)return;
-    String pkg=PublicationAlarmReceiver.packageFor(t.platform);
-    if(pkg==null||!pkg.equals(e.getPackageName().toString())||System.currentTimeMillis()-last<430)return;
-    h.removeCallbacks(retry);process(t);h.postDelayed(retry,760);
+    if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,e.getPackageName()))return;
+    if("TIKTOK_CONFIRMING".equals(state(t.id)) && e.getEventType()==AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
+        && TikTokScheduleVerifier.acceptedText(android.text.TextUtils.join(" ",e.getText()))) {finish(t,"PROGRAMMÉ");return;}
+    if(System.currentTimeMillis()-last<650)return;
+    h.removeCallbacks(retry);process(t);h.postDelayed(retry,1000);
   }
   private void tick(){
-    if(!awake()){h.removeCallbacks(retry);return;}
-    String id=p().getString("active_task_id","");if(id.isEmpty())return;
-    PublicationTask t=PublicationTaskRepository.find(this,id);if(t==null)return;
-    process(t);h.removeCallbacks(retry);h.postDelayed(retry,760);
+    if(!awake()){h.removeCallbacks(retry);h.postDelayed(retry,1000);return;}
+    String id=p().getString("active_task_id","");
+    if(!id.isEmpty()){
+      PublicationTask t=PublicationTaskRepository.find(this,id);
+      if(t!=null)process(t);
+    }
+    h.removeCallbacks(retry);h.postDelayed(retry,1000);
   }
   private void process(PublicationTask t){
     if(!t.id.equals(active)){active=t.id;tries=0;clearPicker(t.id);}
-    if(++tries>420){mark(t,"TIKTOK_PAUSED","TIKTOK — délai dépassé");h.removeCallbacks(retry);return;}
+    if("TIKTOK_PAUSED".equals(state(t.id)))return;
+    if(System.currentTimeMillis()-last<650)return;
+    if(++tries>420){mark(t,"TIKTOK_PAUSED","TIKTOK — délai dépassé, vidéo suivante bloquée");return;}
     AccessibilityNodeInfo r=getRootInActiveWindow();if(r==null)return;
     try{
-      String pkg=PublicationAlarmReceiver.packageFor(t.platform);
-      if(r.getPackageName()==null||pkg==null||!pkg.equals(r.getPackageName().toString()))return;
+      if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,r.getPackageName())){
+        if(tries%12==0)PublicationAlarmReceiver.resumeTarget(this,t);
+        return;
+      }
       if(isTikTok(t))tikTok(r,t);else generic(r,t);
     }finally{r.recycle();}
   }
   private void tikTok(AccessibilityNodeInfo r,PublicationTask t){
     String s=state(t.id);if("TIKTOK_PAUSED".equals(s))return;
-    if("TIKTOK_CONFIRMING".equals(s)&&has(r,"publication programmée","post scheduled","scheduled")){finish(t,"PROGRAMMÉ");return;}
+    if("TIKTOK_CONFIRMING".equals(s)){
+      if(TikTokScheduleVerifier.accepted(r)){finish(t,"PROGRAMMÉ");return;}
+      if(System.currentTimeMillis()-p().getLong("publish_at_"+t.id,0)>120000){mark(t,"TIKTOK_PAUSED","TIKTOK — confirmation absente après Publier, vérifier TikTok avant toute reprise");}
+      return;
+    }
     if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}
-
-    // Une fois les roues validées, TikTok revient sur la feuille "Plus d'options".
-    // Il faut la fermer avant d'appuyer sur Publier. Sinon le bot réouvre l'horloge en boucle.
-    if("TIKTOK_SCHEDULE_READY".equals(s)||"TIKTOK_RETURN_POST".equals(s)){
-      if(has(r,"Plus d’options","Plus d'options","More options")||has(r,"Programmer la publication","Schedule post")){
-        if(performGlobalAction(GLOBAL_ACTION_BACK)){
-          mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour vers l'écran Publier");
-          return;
-        }
+    if("TIKTOK_SCHEDULE_READY".equals(s)){
+      if(TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){
+        p().edit().putBoolean("summary_ok_"+t.id,true).apply();
+        mark(t,"TIKTOK_RETURN_POST","TIKTOK — date et heure confirmées après Terminé");
+      }else if(System.currentTimeMillis()-p().getLong("done_at_"+t.id,0)>15000){
+        mark(t,"TIKTOK_PAUSED","TIKTOK — résumé date/heure illisible après Terminé");
       }
-      if(click(r,"Publier","Post")){
-        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");
+      return;
+    }
+    if("TIKTOK_RETURN_POST".equals(s)){
+      if(!p().getBoolean("summary_ok_"+t.id,false)||!p().getBoolean("meta_ok_"+t.id,false)){
+        mark(t,"TIKTOK_PAUSED","TIKTOK — programmation ou texte non vérifiés");return;
+      }
+      // Un libellé Plus d'options peut aussi figurer sur le formulaire : tester Publier d'abord.
+      if(hasExact(r,"Publier","Post")){
+        if(p().getLong("publish_at_"+t.id,0)>0){mark(t,"TIKTOK_CONFIRMING","TIKTOK — attente confirmation");return;}
+        // Persister avant le geste : une interruption ne doit jamais provoquer un deuxième envoi.
+        p().edit().putLong("publish_at_"+t.id,System.currentTimeMillis()).putString("state_"+t.id,"TIKTOK_CONFIRMING").commit();
+        if(click(r,"Publier","Post")||tapText(r,"Publier","Post"))mark(t,"TIKTOK_CONFIRMING","TIKTOK — Publier appuyé, attente confirmation TikTok");
+        else mark(t,"TIKTOK_PAUSED","TIKTOK — bouton Publier inaccessible");
         return;
+      }
+      if(has(r,"Programmer la publication","Schedule post")){
+        if(performGlobalAction(GLOBAL_ACTION_BACK))mark(t,"TIKTOK_RETURN_POST","TIKTOK — fermeture des options");
       }
       return;
     }
 
     if(has(r,"Ta Story","Your Story")&&click(r,"Suivant","Next")){mark(t,"TIKTOK_NEXT","TIKTOK — Suivant");return;}
-    if(has(r,"Programmer la publication","Schedule post")&&schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte");return;}
+    if(p().getBoolean("meta_ok_"+t.id,false)&&has(r,"Programmer la publication","Schedule post")&&schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte");return;}
     boolean post=has(r,"Publier","Post","Brouillons","Drafts")||has(r,"Ajouter un lien","Add link")||has(r,"Plus d’options","Plus d'options","More options");
     if(post){
       if(!p().getBoolean("meta_ok_"+t.id,false)){if(!meta(r,t))return;mark(t,"TIKTOK_METADATA","TIKTOK — métadonnées vérifiées");return;}
@@ -108,51 +136,42 @@ public class BotAccessibilityService extends AccessibilityService {
     Cols c=columns(r,screen,t.id);diagnostic(r,t,c,target,screen);
     if(c.ok()){
       Calendar date=parseDate(c.d.v);Integer hour=num(c.h.v),minute=num(c.m.v);
-      if(date!=null&&hour!=null&&minute!=null){
+      if(date!=null&&hour!=null&&hour<24&&minute!=null&&minute<60){
         if(!sameDay(date,target)){verifyReset(t.id);wheel(r,c.d,target.after(date)?1:-1,t,"date → "+fmtDate(target));return;}
         int wh=target.get(Calendar.HOUR_OF_DAY);if(hour!=wh){verifyReset(t.id);wheel(r,c.h,dir(hour,wh,24),t,"heure → "+two(wh));return;}
         int wm=target.get(Calendar.MINUTE);if(minute!=wm){verifyReset(t.id);wheel(r,c.m,dir(minute,wm,60),t,"minutes → "+two(wm));return;}
         int n=p().getInt("picker_verified_"+t.id,0)+1;p().edit().putInt("picker_verified_"+t.id,n).apply();
         if(n<2){mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — double contrôle");return;}
-        if(click(r,"Terminé","Done"))mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées");return;
+        if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){
+          p().edit().putLong("done_at_"+t.id,System.currentTimeMillis()).apply();
+          mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date, heure, minutes vérifiées • Terminé");
+        }return;
       }
     }
     fallback(r,t,target,screen);
   }
 
   private void fallback(AccessibilityNodeInfo r,PublicationTask t,Calendar target,Rect screen){
-    String k="fb_"+t.id+"_";android.content.SharedPreferences q=p();
-    if(!q.getBoolean(k+"init",false)){
-      Calendar now=Calendar.getInstance(),a=(Calendar)now.clone(),b=(Calendar)target.clone();zero(a);zero(b);
-      int days=(int)Math.max(0,(b.getTimeInMillis()-a.getTimeInMillis())/86400000L);
-      int hs=dist(now.get(Calendar.HOUR_OF_DAY),target.get(Calendar.HOUR_OF_DAY),24);
-      int ms=dist(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60);
-      q.edit().putBoolean(k+"init",true).putInt(k+"d",days).putInt(k+"h",hs).putInt(k+"hd",dir(now.get(Calendar.HOUR_OF_DAY),target.get(Calendar.HOUR_OF_DAY),24)).putInt(k+"m",ms).putInt(k+"md",dir(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60)).apply();
-    }
-    int d=q.getInt(k+"d",0),hh=q.getInt(k+"h",0),m=q.getInt(k+"m",0);
-    float y=screen.top+screen.height()*.642f,xD=screen.left+screen.width()*.20f,xH=screen.left+screen.width()*.575f,xM=screen.left+screen.width()*.835f;
-    if(d>0){if(step(r,xD,y,1,t,"date"))q.edit().putInt(k+"d",d-1).apply();return;}
-    if(hh>0){int di=q.getInt(k+"hd",1);if(step(r,xH,y,di,t,"heure"))q.edit().putInt(k+"h",hh-1).apply();return;}
-    if(m>0){int di=q.getInt(k+"md",1);if(step(r,xM,y,di,t,"minutes"))q.edit().putInt(k+"m",m-1).apply();return;}
-    mark(t,"TIKTOK_PICKER_WAIT","TIKTOK — roues déplacées, attente lecture avant Terminé");
-  }
-
-  private boolean step(AccessibilityNodeInfo r,float x,float y,int direction,PublicationTask t,String name){
-    if(scrollAt(r,x,y,direction)){last=System.currentTimeMillis();mark(t,"TIKTOK_PICKER_SCROLL","TIKTOK — roue "+name+" défilée");return true;}
-    float den=getResources().getDisplayMetrics().density,d=Math.max(44f,16f*den);
-    return gesture(x,y+(direction>0?d*.52f:-d*.52f),y+(direction>0?-d*.52f:d*.52f),t,"roue "+name);
+    verifyReset(t.id);
+    int count=p().getInt("unreadable_"+t.id,0)+1;p().edit().putInt("unreadable_"+t.id,count).apply();
+    mark(t,count>=12?"TIKTOK_PAUSED":"TIKTOK_PICKER_WAIT","TIKTOK — colonne date/heure/minutes illisible, aucun déplacement au hasard");
   }
   private boolean scrollAt(AccessibilityNodeInfo n,float x,float y,int direction){
     if(n==null)return false;Rect b=new Rect();n.getBoundsInScreen(b);
-    if(b.contains((int)x,(int)y)&&n.isScrollable()){
-      int a=direction>0?AccessibilityNodeInfo.ACTION_SCROLL_FORWARD:AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
-      if(n.performAction(a))return true;
-    }
+    // Descendre jusqu'à la roue : ne jamais défiler le panneau parent commun aux trois colonnes.
     for(int i=0;i<n.getChildCount();i++){AccessibilityNodeInfo c=n.getChild(i);if(c!=null){boolean ok=scrollAt(c,x,y,direction);c.recycle();if(ok)return true;}}
+    if(b.contains((int)x,(int)y)&&n.isScrollable()&&b.width()<getResources().getDisplayMetrics().widthPixels*.48f){
+      return n.performAction(direction>0?AccessibilityNodeInfo.ACTION_SCROLL_FORWARD:AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+    }
     return false;
   }
   private void wheel(AccessibilityNodeInfo r,L l,int direction,PublicationTask t,String what){
-    if(l==null)return;if(scrollAt(r,l.x,l.y,direction)){last=System.currentTimeMillis();mark(t,"TIKTOK_PICKER_SCROLL","TIKTOK — "+what);return;}
+    if(l==null)return;
+    String observation=l.v+":"+what;String key="wheel_observation_"+t.id;
+    int stuck=observation.equals(p().getString(key,""))?p().getInt(key+"_count",0)+1:0;
+    p().edit().putString(key,observation).putInt(key+"_count",stuck).apply();
+    if(stuck>=8){mark(t,"TIKTOK_PAUSED","TIKTOK — roue bloquée : "+what+" (valeur lue "+l.v+")");return;}
+    if(stuck>=2&&scrollAt(r,l.x,l.y,direction)){last=System.currentTimeMillis();mark(t,"TIKTOK_PICKER_SCROLL","TIKTOK — "+what);return;}
     float den=getResources().getDisplayMetrics().density,d=Math.max(16f*den,l.sp*.95f);d=Math.min(d,80f*den);
     gesture(l.x,l.y+(direction>0?d*.55f:-d*.55f),l.y+(direction>0?-d*.55f:d*.55f),t,what);
   }
@@ -164,17 +183,46 @@ public class BotAccessibilityService extends AccessibilityService {
   }
 
   private Cols columns(AccessibilityNodeInfo r,Rect screen,String id){
-    List<AccessibilityNodeInfo> ns=new ArrayList<>();labels(r,ns);List<L> ds=new ArrayList<>(),hs=new ArrayList<>(),ms=new ArrayList<>();
+    List<AccessibilityNodeInfo> ns=new ArrayList<>();labels(r,ns);
+    List<L> ds=new ArrayList<>(),numbers=new ArrayList<>();
+    int selectedY=-1;
     try{
-      for(AccessibilityNodeInfo n:ns){if(!n.isVisibleToUser())continue;String tx=text(n);if(tx.isEmpty())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;
-        float x=(b.centerX()-screen.left)/(float)screen.width();
-        if(dateLabel(tx)&&x<.48f)ds.add(new L(tx,b.centerX(),b.centerY()));
-        else if(tx.matches("[0-9]{1,2}")){if(x>=.43f&&x<.72f)hs.add(new L(tx,b.centerX(),b.centerY()));else if(x>=.72f)ms.add(new L(tx,b.centerX(),b.centerY()));}
+      for(AccessibilityNodeInfo n:ns){
+        if(!n.isVisibleToUser())continue;String tx=text(n);Rect b=new Rect();n.getBoundsInScreen(b);
+        if(b.isEmpty())continue;
+        if(dateLabel(tx))ds.add(new L(tx,b.centerX(),b.centerY()));
+        else if(tx.matches("[0-9]{1,2}"))numbers.add(new L(tx,b.centerX(),b.centerY()));
+        if(n.isSelected()&&(dateLabel(tx)||tx.matches("[0-9]{1,2}")))selectedY=b.centerY();
       }
     }finally{recycle(ns);}
-    int y=p().getInt("picker_center_y_"+id,-1);
-    if(y<0){for(L z:ds){String n=norm(z.v);if(n.contains("aujourd'hui")||n.contains("today")){y=z.y;break;}}if(y<0&&!ds.isEmpty()){sort(ds);y=ds.get(0).y;}if(y>=0)p().edit().putInt("picker_center_y_"+id,y).apply();}
-    return new Cols(near(ds,y),near(hs,y),near(ms,y),space(ds),space(hs),space(ms));
+    if(ds.isEmpty()||numbers.size()<2)return new Cols(null,null,null,42,42,42);
+    sort(ds);int minY=ds.get(0).y,maxY=ds.get(ds.size()-1).y;
+    List<L> hs=new ArrayList<>(),ms=new ArrayList<>();
+    float dateX=ds.get(0).x, minX=Float.MAX_VALUE,maxX=0;
+    for(L n:numbers)if(n.x>dateX+screen.width()*.08f&&n.y>=minY-20&&n.y<=maxY+20){minX=Math.min(minX,n.x);maxX=Math.max(maxX,n.x);}
+    if(maxX-minX<screen.width()*.08f)return new Cols(null,null,null,42,42,42);
+    float split=(minX+maxX)/2;
+    for(L n:numbers)if(n.x>=minX&&n.y>=minY-20&&n.y<=maxY+20){if(n.x<split)hs.add(n);else ms.add(n);}
+    if(hs.isEmpty()||ms.isEmpty())return new Cols(null,null,null,42,42,42);
+    sort(hs);sort(ms);
+    int center=selectedY;
+    if(center<0)center=wheelCenter(r,hs.get(0).x,hs.get(hs.size()/2).y,screen.width());
+    if(center<0){
+      // Symmetric visible wheel rows, never the position of the moving "Aujourd'hui" label.
+      if(hs.size()<3||ms.size()<3)return new Cols(null,null,null,42,42,42);
+      center=(hs.get(0).y+hs.get(hs.size()-1).y)/2;
+      int minuteCenter=(ms.get(0).y+ms.get(ms.size()-1).y)/2;
+      if(Math.abs(center-minuteCenter)>space(hs)*.4f)return new Cols(null,null,null,42,42,42);
+    }
+    L d=near(ds,center),hh=near(hs,center),mm=near(ms,center);
+    if(d==null||hh==null||mm==null||Math.abs(d.y-center)>space(ds)*.45f||Math.abs(hh.y-center)>space(hs)*.45f||Math.abs(mm.y-center)>space(ms)*.45f)return new Cols(null,null,null,42,42,42);
+    p().edit().putInt("picker_center_y_"+id,center).putInt("unreadable_"+id,0).apply();
+    return new Cols(d,hh,mm,space(ds),space(hs),space(ms));
+  }
+  private int wheelCenter(AccessibilityNodeInfo n,float x,int y,int width){
+    for(int i=0;i<n.getChildCount();i++){AccessibilityNodeInfo c=n.getChild(i);if(c!=null){int found=wheelCenter(c,x,y,width);c.recycle();if(found>=0)return found;}}
+    Rect b=new Rect();n.getBoundsInScreen(b);
+    return n.isScrollable()&&b.width()<width*.48f&&b.contains((int)x,y)?b.centerY():-1;
   }
 
   private void diagnostic(AccessibilityNodeInfo r,PublicationTask t,Cols c,Calendar target,Rect screen){
@@ -198,15 +246,26 @@ public class BotAccessibilityService extends AccessibilityService {
   private static int dir(int c,int t,int mod){int f=(t-c+mod)%mod,b=(c-t+mod)%mod;return f<=b?1:-1;}
   private static int dist(int c,int t,int mod){int f=(t-c+mod)%mod,b=(c-t+mod)%mod;return Math.min(f,b);}
   private static Integer num(String s){if(s==null)return null;String n=s.replaceAll("[^0-9]","");if(n.isEmpty())return null;try{return Integer.parseInt(n);}catch(Exception e){return null;}}
-  private static boolean dateLabel(String s){if(s==null)return false;String v=s.toLowerCase(Locale.FRANCE).replace("’","'");return v.contains("aujourd'hui")||v.contains("today")||v.matches(".*(janv|févr|fevr|mars|avr|mai|juin|juil|août|aout|sept|oct|nov|déc|dec).*\\d{1,2}.*");}
-  private Calendar parseDate(String s){if(s==null)return null;String n=norm(s);Calendar today=Calendar.getInstance();zero(today);if(n.contains("aujourd'hui")||n.contains("today"))return today;for(int i=0;i<=31;i++){Calendar q=(Calendar)today.clone();q.add(Calendar.DAY_OF_YEAR,i);String day=""+q.get(Calendar.DAY_OF_MONTH),mo=norm(new SimpleDateFormat("MMM",Locale.FRANCE).format(q.getTime()));if(n.contains(mo)&&java.util.regex.Pattern.compile("(?<![0-9])"+day+"(?![0-9])").matcher(n).find())return q;}return null;}
+  private static boolean dateLabel(String s){if(s==null)return false;String v=s.toLowerCase(Locale.FRANCE).replace("’","'");return v.contains("demain")||v.contains("tomorrow")||v.contains("aujourd'hui")||v.contains("today")||v.matches("(?=.*[0-9])(?=.*(jan|fév|fev|feb|mars|mar|avr|apr|mai|may|juin|jun|juil|jul|août|aout|aug|sep|oct|nov|déc|dec)).*");}
+  private Calendar parseDate(String s){
+    if(s==null)return null;String n=norm(s);Calendar today=Calendar.getInstance();zero(today);
+    if(n.contains("aujourd'hui")||n.contains("today"))return today;
+    if(n.contains("demain")||n.contains("tomorrow")){today.add(Calendar.DAY_OF_YEAR,1);return today;}
+    for(int i=0;i<=31;i++){
+      Calendar q=(Calendar)today.clone();q.add(Calendar.DAY_OF_YEAR,i);
+      for(Locale locale:new Locale[]{Locale.FRANCE,Locale.ENGLISH}){
+        String mo=norm(new SimpleDateFormat("MMM",locale).format(q.getTime()));
+        if(n.contains(mo)&&java.util.regex.Pattern.compile("(?<![0-9])"+q.get(Calendar.DAY_OF_MONTH)+"(?![0-9])").matcher(n).find())return q;
+      }
+    }return null;
+  }
   private static String norm(String s){return s.toLowerCase(Locale.FRANCE).replace(".","").replace("’","'").replace("é","e").replace("è","e").replace("ê","e").replace("û","u").replace("ù","u").replace("ô","o").replace("î","i").replace("ï","i").replace("à","a").trim();}
   private static void zero(Calendar c){c.set(Calendar.HOUR_OF_DAY,0);c.set(Calendar.MINUTE,0);c.set(Calendar.SECOND,0);c.set(Calendar.MILLISECOND,0);}
   private static boolean sameDay(Calendar a,Calendar b){return a.get(Calendar.YEAR)==b.get(Calendar.YEAR)&&a.get(Calendar.DAY_OF_YEAR)==b.get(Calendar.DAY_OF_YEAR);}
   private static String fmtDate(Calendar c){return new SimpleDateFormat("dd/MM/yyyy",Locale.FRANCE).format(c.getTime());}
   private static String two(int v){return String.format(Locale.FRANCE,"%02d",v);}
   private void verifyReset(String id){p().edit().remove("picker_verified_"+id).apply();}
-  private void clearPicker(String id){android.content.SharedPreferences.Editor e=p().edit().remove("picker_verified_"+id).remove("picker_center_y_"+id);String k="fb_"+id+"_";e.remove(k+"init").remove(k+"d").remove(k+"h").remove(k+"hd").remove(k+"m").remove(k+"md").apply();}
+  private void clearPicker(String id){android.content.SharedPreferences.Editor e=p().edit().remove("picker_verified_"+id).remove("picker_center_y_"+id).remove("unreadable_"+id);String k="fb_"+id+"_";e.remove(k+"init").remove(k+"d").remove(k+"h").remove(k+"hd").remove(k+"m").remove(k+"md").apply();}
   private boolean schedule(AccessibilityNodeInfo r){return click(r,"Programmer la publication","Programmer","Schedule post","Schedule");}
   private boolean swipeUp(){if(Build.VERSION.SDK_INT<24)return false;android.util.DisplayMetrics d=getResources().getDisplayMetrics();Path pth=new Path();pth.moveTo(d.widthPixels*.5f,d.heightPixels*.78f);pth.lineTo(d.widthPixels*.5f,d.heightPixels*.38f);boolean ok=dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,420)).build(),null,null);if(ok)last=System.currentTimeMillis();return ok;}
   private static boolean scroll(AccessibilityNodeInfo r){if(r==null)return false;if(r.isScrollable()&&r.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD))return true;for(int i=0;i<r.getChildCount();i++){AccessibilityNodeInfo c=r.getChild(i);if(c!=null){boolean ok=scroll(c);c.recycle();if(ok)return true;}}return false;}
@@ -216,16 +275,32 @@ public class BotAccessibilityService extends AccessibilityService {
   private static String text(AccessibilityNodeInfo n){if(n.getText()!=null&&!n.getText().toString().trim().isEmpty())return n.getText().toString().trim();return n.getContentDescription()==null?"":n.getContentDescription().toString().trim();}
   private static String desc(AccessibilityNodeInfo n){StringBuilder b=new StringBuilder();if(n.getViewIdResourceName()!=null)b.append(n.getViewIdResourceName());if(n.getContentDescription()!=null)b.append(' ').append(n.getContentDescription());if(Build.VERSION.SDK_INT>=26&&n.getHintText()!=null)b.append(' ').append(n.getHintText());if(n.getText()!=null)b.append(' ').append(n.getText());return b.toString().toLowerCase(Locale.ROOT);}
   private static boolean set(AccessibilityNodeInfo n,String v){Bundle b=new Bundle();b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,v);return n.isEditable()&&n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,b);}
-  private static boolean click(AccessibilityNodeInfo r,String...ls){for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns)if(clickNode(n))return true;}finally{recycle(ns);}}return false;}
-  private static boolean clickNode(AccessibilityNodeInfo n){AccessibilityNodeInfo c=AccessibilityNodeInfo.obtain(n);try{while(c!=null){if(c.isClickable()&&c.isEnabled())return c.performAction(AccessibilityNodeInfo.ACTION_CLICK);AccessibilityNodeInfo x=c.getParent();c.recycle();c=x;}return false;}finally{if(c!=null)c.recycle();}}
-  private static boolean has(AccessibilityNodeInfo r,String...ls){for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);boolean f=ns!=null&&!ns.isEmpty();recycle(ns);if(f)return true;}return false;}
+  private boolean tapText(AccessibilityNodeInfo r,String...ls){
+    if(Build.VERSION.SDK_INT<24)return false;
+    for(String label:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(label);
+      try{if(ns!=null)for(AccessibilityNodeInfo n:ns){if(!n.isVisibleToUser()||!n.isEnabled()||!norm(text(n)).equals(norm(label)))continue;
+        Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path path=new Path();path.moveTo(b.centerX(),b.centerY());
+        if(dispatchGesture(new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(path,0,90)).build(),null,null)){last=System.currentTimeMillis();return true;}
+      }}finally{recycle(ns);}
+    }return false;
+  }
+  private static boolean hasExact(AccessibilityNodeInfo r,String...ls){
+    for(String label:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(label);try{if(ns!=null)for(AccessibilityNodeInfo n:ns)if(n.isVisibleToUser()&&n.isEnabled()&&norm(text(n)).equals(norm(label)))return true;}finally{recycle(ns);}}return false;
+  }
+  private static boolean click(AccessibilityNodeInfo r,String...ls){
+    for(String label:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(label);try{if(ns!=null)for(AccessibilityNodeInfo n:ns)if(n.isVisibleToUser()&&n.isEnabled()&&norm(text(n)).equals(norm(label))&&clickNode(n))return true;}finally{recycle(ns);}}return false;
+  }
+  private static boolean clickNode(AccessibilityNodeInfo n){AccessibilityNodeInfo c=AccessibilityNodeInfo.obtain(n);try{while(c!=null){if(c.isVisibleToUser()&&c.isClickable()&&c.isEnabled()&&c.performAction(AccessibilityNodeInfo.ACTION_CLICK))return true;AccessibilityNodeInfo x=c.getParent();c.recycle();c=x;}return false;}finally{if(c!=null)c.recycle();}}
+  private static boolean has(AccessibilityNodeInfo r,String...ls){for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);boolean f=false;if(ns!=null)for(AccessibilityNodeInfo n:ns)if(n.isVisibleToUser())f=true;recycle(ns);if(f)return true;}return false;}
   private void mark(PublicationTask t,String s,String status){p().edit().putString("state_"+t.id,s).apply();t.status=status;PublicationTaskRepository.save(this,t);last=System.currentTimeMillis();}
   private String state(String id){return p().getString("state_"+id,"");}
-  private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);}
+  private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);
+    PublicationCoordinator.completed(this,t);
+  }
   private static boolean isTikTok(PublicationTask t){return t.platform!=null&&t.platform.toLowerCase(Locale.ROOT).contains("tiktok");}
   private static void recycle(List<AccessibilityNodeInfo>ns){if(ns!=null)for(AccessibilityNodeInfo n:ns)if(n!=null)n.recycle();}
   private static final class L{final String v;final float x;final int y;float sp=42f;L(String v,float x,int y){this.v=v;this.x=x;this.y=y;}}
   private static final class Cols{final L d,h,m;Cols(L d,L h,L m,float ds,float hs,float ms){this.d=d;this.h=h;this.m=m;if(d!=null)d.sp=ds;if(h!=null)h.sp=hs;if(m!=null)m.sp=ms;}boolean ok(){return d!=null&&h!=null&&m!=null;}}
   @Override public void onInterrupt(){}
-  @Override public void onDestroy(){h.removeCallbacksAndMessages(null);super.onDestroy();}
+  @Override public void onDestroy(){if(remoteBridge!=null)remoteBridge.stop();h.removeCallbacksAndMessages(null);super.onDestroy();}
 }

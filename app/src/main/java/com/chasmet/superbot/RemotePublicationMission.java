@@ -11,12 +11,16 @@ import java.util.Locale;
 public final class RemotePublicationMission {
     private RemotePublicationMission() {}
 
-    public static Result dispatch(Context context, JSONObject payload) {
+    public static Result dispatch(Context context, JSONObject payload, String commandId) {
         try {
+            PublicationTask existing=PublicationTaskRepository.find(context,commandId);
+            if(existing!=null)return new Result(true,"publication_already_received:"+existing.id);
+            if(PublicationCoordinator.busy(context))return new Result(false,"publication_busy");
             String platform = normalize(payload.optString("platform", ""));
             if (platform == null) return new Result(false, "invalid_platform");
 
             PublicationTask task = new PublicationTask();
+            task.id = commandId;
             task.platform = platform;
             task.videoPath = resolveVideoPath(context, payload.optString("mediaUri", ""));
             task.title = payload.optString("title", "");
@@ -25,9 +29,11 @@ public final class RemotePublicationMission {
             task.visibility = payload.optString("visibility", "Public");
             long when = payload.optLong("scheduledAt", System.currentTimeMillis());
             if (when > 0 && when < 100000000000L) when *= 1000L;
+            if(when<=System.currentTimeMillis()+60000)return new Result(false,"scheduled_time_expired_or_too_close");
             task.scheduledAt = when;
             task.status = "MISSION MCP • reçue";
             PublicationTaskRepository.save(context, task);
+            PublicationCoordinator.prefs(context).edit().putBoolean("remote_"+task.id,true).commit();
 
             if (task.videoPath == null || task.videoPath.isEmpty() || !new File(task.videoPath).exists()) {
                 task.status = "ERREUR MCP • vidéo introuvable";
@@ -37,7 +43,7 @@ public final class RemotePublicationMission {
 
             boolean started = PublicationAlarmReceiver.dispatchNow(context, task);
             if (started) {
-                return new Result(true, "publication_dispatched:" + task.id + ":" + task.platform);
+                return new Result(true, "publication_running:" + task.id + ":" + task.platform);
             }
 
             PublicationTask latest = PublicationTaskRepository.find(context, task.id);
@@ -71,8 +77,17 @@ public final class RemotePublicationMission {
             }
         }
         File root = new File(context.getExternalFilesDir(null), "Movies/SuperBot");
+        if(!raw.isEmpty()){
+            java.util.List<File> matches=new java.util.ArrayList<>();findNamed(root,raw,matches);
+            return matches.size()==1?matches.get(0).getAbsolutePath():"";
+        }
         File latest = newestMp4(root, null);
         return latest == null ? "" : latest.getAbsolutePath();
+    }
+
+    private static void findNamed(File dir,String name,java.util.List<File> out){
+        File[] files=dir.listFiles();if(files==null)return;
+        for(File f:files){if(f.isDirectory())findNamed(f,name,out);else if(f.getName().equals(name))out.add(f);}
     }
 
     private static File newestMp4(File dir, File best) {

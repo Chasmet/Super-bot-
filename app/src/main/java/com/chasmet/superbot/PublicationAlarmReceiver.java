@@ -34,7 +34,15 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
         }
     }
 
-    public static boolean dispatchNow(Context context, PublicationTask task) {
+    public static synchronized boolean dispatchNow(Context context, PublicationTask task) {
+        if (task.id == null || task.id.isEmpty()) PublicationTaskRepository.save(context,task);
+        if (PublicationCoordinator.busy(context)) {
+            String current=PublicationCoordinator.prefs(context).getString("active_task_id","");
+            if(current.equals(task.id))return true;
+            task.status="EN FILE • une vidéo à la fois";
+            PublicationTaskRepository.save(context,task);
+            return true;
+        }
         if (!isSuperBotAwake(context)) {
             task.status = "EN VEILLE • Super Bot déconnecté";
             PublicationTaskRepository.save(context, task);
@@ -103,6 +111,17 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
                     .apply();
             return false;
         }
+    }
+
+    static boolean resumeTarget(Context context, PublicationTask task) {
+        String[] packages=packagesFor(task.platform);if(packages==null)return false;
+        for(String pkg:packages){
+            try{
+                Intent launch=context.getPackageManager().getLaunchIntentForPackage(pkg);
+                if(launch!=null){launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);context.startActivity(launch);return true;}
+            }catch(Exception ignored){}
+        }
+        return false;
     }
 
     static String packageFor(String platform) {

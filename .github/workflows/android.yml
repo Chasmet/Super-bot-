@@ -52,8 +52,13 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Test TikTok date and confirmation policy
+        run: |
+          javac -d /tmp/superbot-tests app/src/main/java/com/chasmet/superbot/TikTokTextPolicy.java tests/TikTokTextPolicyTest.java
+          java -cp /tmp/superbot-tests com.chasmet.superbot.TikTokTextPolicyTest
+
       - name: Build and audit debug APK
-        run: gradle assembleDebug lintDebug
+        run: ./gradlew assembleDebug lintDebug
 
       - name: Prepare APK name
         id: version
