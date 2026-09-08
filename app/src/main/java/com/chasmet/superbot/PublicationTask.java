@@ -10,6 +10,7 @@ public final class PublicationTask {
     public String visibility;
     public long scheduledAt;
     public String status;
+    public String remoteCommandId;
 
     public PublicationTask() {}
 }
