@@ -10,8 +10,8 @@ android {
         applicationId 'com.chasmet.superbot'
         minSdk 21
         targetSdk 34
-        versionCode 33
-        versionName '1.3.20'
+        versionCode 34
+        versionName '1.3.21'
     }
 
     signingConfigs {
@@ -69,8 +69,7 @@ tasks.named('preBuild').configure {
                 'if("TIKTOK_CONFIRMING".equals(s)&&has(r,"publication programmée","post scheduled","scheduled")){finish(t,"PROGRAMMÉ");return;}',
                 'if("TIKTOK_CONFIRMING".equals(s)&&TikTokScheduleVerifier.accepted(r)){finish(t,"PROGRAMMÉ");return;}')
 
-        // Si le bouton Terminé est affiché après validation des roues, le bot doit le valider,
-        // même si TikTok n'expose pas correctement un parent cliquable dans l'arbre Accessibility.
+        // Si le bouton Terminé est affiché après validation des roues, le bot doit le valider.
         text = text.replace(
                 'if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}',
                 'if("TIKTOK_SCHEDULE_READY".equals(s)&&has(r,"Date et heure de publication","Date and time of publication")){if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — Terminé validé");}return;} if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}')
@@ -78,11 +77,15 @@ tasks.named('preBuild').configure {
                 'if(click(r,"Terminé","Done"))mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées");return;',
                 'if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — jour, heure et minutes validés • Terminé");h.removeCallbacks(retry);h.postDelayed(retry,900);}else{mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — valeurs correctes, recherche Terminé");}return;')
 
-        // Parcours complet après Terminé : vérifier la programmation, fermer Plus d'options,
-        // revenir au formulaire principal, vérifier encore date/heure, puis seulement appuyer sur Publier.
+        // Parcours complet après Terminé : vérifier la programmation, revenir au formulaire, puis Publier.
         text = text.replace(
                 'if("TIKTOK_SCHEDULE_READY".equals(s)||"TIKTOK_RETURN_POST".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){\n          mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour vers l\'écran Publier");\n          return;\n        }\n      }\n      if(click(r,"Publier","Post")){\n        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");\n        return;\n      }\n      return;\n    }',
                 'if("TIKTOK_SCHEDULE_READY".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){mark(t,"TIKTOK_PAUSED","TIKTOK — date/heure non vérifiées après Terminé");return;}\n        mark(t,"TIKTOK_SCHEDULE_VERIFIED","TIKTOK — programmation active et date/heure vérifiées");return;\n      }\n      return;\n    }\n    if("TIKTOK_SCHEDULE_VERIFIED".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){mark(t,"TIKTOK_RETURN_POST","TIKTOK — panneau fermé, retour vers Publier");return;}\n        return;\n      }\n      mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour formulaire principal");return;\n    }\n    if("TIKTOK_RETURN_POST".equals(s)){\n      if(!has(r,"Publier","Post"))return;\n      if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){mark(t,"TIKTOK_PAUSED","TIKTOK — date/heure non vérifiées avant Publier");return;}\n      if(click(r,"Publier","Post")||tapText(r,"Publier","Post")){mark(t,"TIKTOK_CONFIRMING","TIKTOK — Publier validé, attente confirmation TikTok");return;}\n      return;\n    }')
+
+        // Quand TikTok confirme réellement une vidéo, démarrer seulement alors la vidéo suivante de la file.
+        text = text.replace(
+                'private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);}',
+                'private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);PublicationQueueCoordinator.startNextAfterConfirmed(this);}')
 
         // Secours tactile : toucher le centre du libellé lu à l'écran quand ACTION_CLICK est refusé.
         text = text.replace(
@@ -103,7 +106,6 @@ tasks.named('preBuild').configure {
         source.write(text, 'UTF-8')
 
         // Une mission complète peut provenir de ChatGPT : le package source ne doit jamais la bloquer.
-        // La mission est transformée en PublicationTask, puis le bot ouvre lui-même le réseau cible.
         def remoteSource = file('src/main/java/com/chasmet/superbot/SuperBotRemoteBridge.java')
         def remoteText = remoteSource.getText('UTF-8')
         remoteText = remoteText.replace(
