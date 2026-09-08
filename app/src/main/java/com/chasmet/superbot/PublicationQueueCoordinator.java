@@ -7,35 +7,32 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Orchestre les missions sociales une par une.
- * Une mission reçue n'est jamais considérée comme exécutée tant qu'un vrai dispatch Android n'a pas démarré.
- */
 public final class PublicationQueueCoordinator {
     public static final int MAX_QUEUE = 7;
     private static final String PREFS = "superbot_bot_state";
     private static final String ACTIVE = "active_task_id";
-    private static final String QUEUED_PREFIX = "EN FILE MCP";
+    private static final String QUEUED_PREFIX = "queued";
 
     private PublicationQueueCoordinator() {}
 
     public static synchronized EnqueueResult enqueue(Context context, PublicationTask task) {
         if (context == null || task == null) return new EnqueueResult(false, false, "invalid_task");
-
         reconcileActive(context);
         collapseQueuedDuplicates(context);
 
         PublicationTask duplicate = findPendingDuplicate(context, task);
         if (duplicate != null && !duplicate.id.equals(task.id)) {
-            task.status = "ANNULÉ MCP • doublon de " + duplicate.id;
+            task.status = "failed: duplicate_pending";
             PublicationTaskRepository.save(context, task);
-            return new EnqueueResult(true, false, "duplicate_pending:" + duplicate.id);
+            RemoteTaskReporter.failed(context, task, "duplicate_pending");
+            return new EnqueueResult(false, false, "duplicate_pending:" + duplicate.id);
         }
 
         int pending = countPending(context);
         if (pending >= MAX_QUEUE) {
-            task.status = "ERREUR MCP • file pleine (7 vidéos max)";
+            task.status = "failed: queue_full_7";
             PublicationTaskRepository.save(context, task);
+            RemoteTaskReporter.failed(context, task, "queue_full:7");
             return new EnqueueResult(false, false, "queue_full:7");
         }
 
@@ -49,26 +46,31 @@ public final class PublicationQueueCoordinator {
                     int position = queuedCount(context) + 1;
                     task.status = QUEUED_PREFIX + " • position " + position + "/" + MAX_QUEUE;
                     PublicationTaskRepository.save(context, task);
+                    RemoteTaskReporter.progress(context, task, "queued", "publication_queued");
                     return new EnqueueResult(true, false, "publication_queued:" + task.id + ":position=" + position);
                 }
             }
-
             boolean started = PublicationAlarmReceiver.dispatchNow(context, task);
-            if (started) return new EnqueueResult(true, true, "publication_dispatched:" + task.id + ":" + task.platform);
-
+            if (started) {
+                task.status = "android_started";
+                PublicationTaskRepository.save(context, task);
+                RemoteTaskReporter.progress(context, task, "android_started", "publication_dispatched");
+                return new EnqueueResult(true, true, "publication_dispatched:" + task.id + ":" + task.platform);
+            }
             PublicationTask latest = PublicationTaskRepository.find(context, task.id);
             String status = latest == null ? task.status : latest.status;
             if (status == null || status.trim().isEmpty()) status = "dispatch_failed";
+            RemoteTaskReporter.failed(context, task, status);
             return new EnqueueResult(false, false, "publication_dispatch_failed:" + task.id + ":" + status);
         }
 
         int position = queuedCount(context) + 1;
         task.status = QUEUED_PREFIX + " • position " + position + "/" + MAX_QUEUE;
         PublicationTaskRepository.save(context, task);
+        RemoteTaskReporter.progress(context, task, "queued", "publication_queued");
         return new EnqueueResult(true, false, "publication_queued:" + task.id + ":position=" + position);
     }
 
-    /** Appelé uniquement après confirmation finale du réseau social. */
     public static synchronized void startNextAfterConfirmed(Context context) {
         if (context == null) return;
         reconcileActive(context);
@@ -78,10 +80,6 @@ public final class PublicationQueueCoordinator {
         if (next != null) startQueued(context, next, "démarrage après confirmation précédente");
     }
 
-    /**
-     * Secours utilisé au démarrage/heartbeat : si active_task_id est fantôme, il est supprimé
-     * puis la première vraie mission en file est exécutée sur le téléphone.
-     */
     public static synchronized void recoverIfIdle(Context context) {
         if (context == null) return;
         reconcileActive(context);
@@ -92,17 +90,19 @@ public final class PublicationQueueCoordinator {
     }
 
     private static boolean startQueued(Context context, PublicationTask task, String reason) {
-        task.status = "MISSION MCP • " + reason;
+        task.status = "android_starting";
         PublicationTaskRepository.save(context, task);
         boolean started = PublicationAlarmReceiver.dispatchNow(context, task);
-        if (!started) {
-            PublicationTask latest = PublicationTaskRepository.find(context, task.id);
-            if (latest != null && latest.status != null && latest.status.startsWith("ERREUR")) {
-                // On s'arrête sur l'erreur : aucune autre vidéo ne doit démarrer derrière.
-                return false;
-            }
+        if (started) {
+            task.status = "android_started";
+            PublicationTaskRepository.save(context, task);
+            RemoteTaskReporter.progress(context, task, "android_started", reason);
+            return true;
         }
-        return started;
+        PublicationTask latest = PublicationTaskRepository.find(context, task.id);
+        String error = latest == null ? "dispatch_failed" : latest.status;
+        RemoteTaskReporter.failed(context, task, error);
+        return false;
     }
 
     private static void reconcileActive(Context context) {
@@ -110,9 +110,7 @@ public final class PublicationQueueCoordinator {
         String activeId = prefs.getString(ACTIVE, "");
         if (activeId == null || activeId.isEmpty()) return;
         PublicationTask active = PublicationTaskRepository.find(context, activeId);
-        if (active == null || isTerminal(active.status) || isQueued(active.status)) {
-            prefs.edit().remove(ACTIVE).apply();
-        }
+        if (active == null || isTerminal(active.status) || isQueued(active.status)) prefs.edit().remove(ACTIVE).apply();
     }
 
     private static boolean hasActive(Context context) {
@@ -121,16 +119,13 @@ public final class PublicationQueueCoordinator {
     }
 
     private static PublicationTask firstQueued(Context context) {
-        for (PublicationTask task : PublicationTaskRepository.load(context)) {
-            if (isQueued(task.status)) return task;
-        }
+        for (PublicationTask task : PublicationTaskRepository.load(context)) if (isQueued(task.status)) return task;
         return null;
     }
 
     private static PublicationTask findPendingDuplicate(Context context, PublicationTask incoming) {
         for (PublicationTask task : PublicationTaskRepository.load(context)) {
-            if (task.id == null || task.id.equals(incoming.id)) continue;
-            if (isTerminal(task.status)) continue;
+            if (task.id == null || task.id.equals(incoming.id) || isTerminal(task.status)) continue;
             if (sameMission(task, incoming)) return task;
         }
         return null;
@@ -142,36 +137,32 @@ public final class PublicationQueueCoordinator {
             if (!isQueued(task.status)) continue;
             String key = missionKey(task);
             if (seen.add(key)) continue;
-            task.status = "ANNULÉ MCP • doublon retiré de la file";
+            task.status = "failed: duplicate_removed";
             PublicationTaskRepository.save(context, task);
+            RemoteTaskReporter.failed(context, task, "duplicate_removed");
         }
     }
 
-    private static boolean sameMission(PublicationTask a, PublicationTask b) {
-        return missionKey(a).equals(missionKey(b));
-    }
+    private static boolean sameMission(PublicationTask a, PublicationTask b) { return missionKey(a).equals(missionKey(b)); }
 
     private static String missionKey(PublicationTask t) {
         String path = t.videoPath == null ? "" : t.videoPath;
         String platform = t.platform == null ? "" : t.platform;
-        return platform + "|" + path + "|" + t.scheduledAt;
+        String title = t.title == null ? "" : t.title;
+        String description = t.description == null ? "" : t.description;
+        String hashtags = t.hashtags == null ? "" : t.hashtags;
+        return platform + "|" + path + "|" + t.scheduledAt + "|" + title + "|" + description + "|" + hashtags;
     }
 
-    private static boolean isQueued(String status) {
-        return status != null && status.startsWith(QUEUED_PREFIX);
-    }
+    private static boolean isQueued(String status) { return status != null && status.startsWith(QUEUED_PREFIX); }
 
     private static boolean isTerminal(String status) {
         if (status == null) return false;
-        String s = status.toUpperCase();
-        return s.startsWith("PROGRAMMÉ") || s.startsWith("ERREUR") || s.startsWith("ANNULÉ") || s.startsWith("ANNULE");
+        String s = status.toLowerCase();
+        return s.startsWith("completed") || s.startsWith("failed") || s.startsWith("programmé") || s.startsWith("erreur") || s.startsWith("annulé") || s.startsWith("annule");
     }
 
-    private static int countPending(Context context) {
-        int count = hasActive(context) ? 1 : 0;
-        count += queuedCount(context);
-        return count;
-    }
+    private static int countPending(Context context) { return (hasActive(context) ? 1 : 0) + queuedCount(context); }
 
     private static int queuedCount(Context context) {
         int count = 0;
@@ -184,11 +175,6 @@ public final class PublicationQueueCoordinator {
         public final boolean ok;
         public final boolean started;
         public final String message;
-
-        EnqueueResult(boolean ok, boolean started, String message) {
-            this.ok = ok;
-            this.started = started;
-            this.message = message;
-        }
+        EnqueueResult(boolean ok, boolean started, String message) { this.ok = ok; this.started = started; this.message = message; }
     }
 }
