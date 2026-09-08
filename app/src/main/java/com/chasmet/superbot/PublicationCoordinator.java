@@ -26,6 +26,8 @@ final class PublicationCoordinator {
         String id=prefs(c).getString("return_task_id","");
         if(!id.isEmpty())prefs(c).edit().putBoolean("menu_returned_"+id,true).remove("return_task_id").commit();
         if(busy(c)||!PublicationAlarmReceiver.isSuperBotAwake(c))return;
+        PublicationQueueCoordinator.startNextAfterConfirmed(c);
+        if(busy(c))return;
         for(PublicationTask t:PublicationTaskRepository.load(c)) {
             if("EN FILE • une vidéo à la fois".equals(t.status)) {
                 PublicationAlarmReceiver.dispatchNow(c,t);return;
