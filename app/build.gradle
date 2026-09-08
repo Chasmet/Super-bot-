@@ -10,8 +10,8 @@ android {
         applicationId 'com.chasmet.superbot'
         minSdk 21
         targetSdk 34
-        versionCode 35
-        versionName '1.3.22'
+        versionCode 36
+        versionName '1.3.23'
     }
 
     signingConfigs {
@@ -39,21 +39,22 @@ dependencies {
     implementation 'androidx.core:core:1.13.1'
 }
 
-// Correctifs TikTok ciblés + pont MCP Render.
 tasks.named('preBuild').configure {
     doFirst {
         def source = file('src/main/java/com/chasmet/superbot/BotAccessibilityService.java')
         def text = source.getText('UTF-8')
 
-        // Accepte les deux packages TikTok connus, ainsi que les variantes prévues pour les autres réseaux.
         text = text.replace(
                 'String pkg=PublicationAlarmReceiver.packageFor(t.platform);\n    if(pkg==null||!pkg.equals(e.getPackageName().toString())||System.currentTimeMillis()-last<430)return;',
                 'if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,e.getPackageName())||System.currentTimeMillis()-last<430)return;')
         text = text.replace(
                 'String pkg=PublicationAlarmReceiver.packageFor(t.platform);\n      if(r.getPackageName()==null||pkg==null||!pkg.equals(r.getPackageName().toString()))return;',
                 'if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,r.getPackageName()))return;')
+        text = text.replace(
+                'if(isTikTok(t))tikTok(r,t);else generic(r,t);',
+                'if(isTikTok(t)){if("android_started".equals(t.status)){t.status="tiktok_opened";PublicationTaskRepository.save(this,t);RemoteTaskReporter.progress(this,t,"tiktok_opened","tiktok_opened");}tikTok(r,t);}else generic(r,t);')
 
-        // Roue des minutes selon le cheminement observé sur TikTok.
+        // Roues indépendantes : jour, heure, minutes. Chaque déplacement est relu avant la suite.
         text = text.replace(
                 'wheel(r,c.m,dir(minute,wm,60),t,"minutes → "+two(wm))',
                 'wheel(r,c.m,(wm<=30?-1:1),t,"minutes → "+two(wm))')
@@ -64,35 +65,53 @@ tasks.named('preBuild').configure {
                 '.putInt(k+"md",dir(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60))',
                 '.putInt(k+"md",target.get(Calendar.MINUTE)<=30?-1:1)')
 
-        // Confirmation finale : ne considérer la mission comme terminée qu'après un retour explicite de TikTok.
+        // Aucun succès tant que TikTok n'a pas confirmé la programmation.
         text = text.replace(
                 'if("TIKTOK_CONFIRMING".equals(s)&&has(r,"publication programmée","post scheduled","scheduled")){finish(t,"PROGRAMMÉ");return;}',
-                'if("TIKTOK_CONFIRMING".equals(s)&&TikTokScheduleVerifier.accepted(r)){finish(t,"PROGRAMMÉ");return;}')
+                'if("TIKTOK_CONFIRMING".equals(s)&&TikTokScheduleVerifier.accepted(r)){finish(t,"completed: scheduled_confirmed");return;}')
 
-        // Si le bouton Terminé est affiché après validation des roues, le bot doit le valider.
+        // Le bouton Terminé : nœud visible + clickable, clic tactile au centre exact, maximum 3 essais.
         text = text.replace(
                 'if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}',
-                'if("TIKTOK_SCHEDULE_READY".equals(s)&&has(r,"Date et heure de publication","Date and time of publication")){if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — Terminé validé");}return;} if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}')
+                'if("TIKTOK_SCHEDULE_READY".equals(s)&&has(r,"Date et heure de publication","Date and time of publication")){int da=p().getInt("done_attempts_"+t.id,0);if(da>=3){failTask(t,"done_click_failed");return;}if(clickDoneCenter(r)){p().edit().putInt("done_attempts_"+t.id,da+1).apply();mark(t,"TIKTOK_SCHEDULE_READY","done_clicked");h.removeCallbacks(retry);h.postDelayed(retry,500);}else{failTask(t,"done_button_not_found");}return;} if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}')
         text = text.replace(
                 'if(click(r,"Terminé","Done"))mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées");return;',
-                'if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — jour, heure et minutes validés • Terminé");h.removeCallbacks(retry);h.postDelayed(retry,900);}else{mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — valeurs correctes, recherche Terminé");}return;')
+                'if(clickDoneCenter(r)){p().edit().putInt("done_attempts_"+t.id,1).apply();mark(t,"TIKTOK_SCHEDULE_READY","done_clicked");h.removeCallbacks(retry);h.postDelayed(retry,500);}else{failTask(t,"done_button_not_found");}return;')
 
-        // Parcours complet après Terminé : vérifier la programmation, revenir au formulaire, puis Publier.
+        // États fiables issus du parcours montré en vidéo.
+        text = text.replace('mark(t,"TIKTOK_NEXT","TIKTOK — Suivant")','mark(t,"TIKTOK_NEXT","media_selected")')
+        text = text.replace('mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte")','mark(t,"TIKTOK_SCHEDULE_OPEN","schedule_opened")')
+        text = text.replace('mark(t,"TIKTOK_METADATA","TIKTOK — métadonnées vérifiées")','mark(t,"TIKTOK_METADATA","metadata_filled")')
+        text = text.replace('mark(t,"TIKTOK_MORE_OPTIONS","TIKTOK — Plus d\'options")','mark(t,"TIKTOK_MORE_OPTIONS","open_more_options")')
+
+        // Après Terminé : vérifier fermeture du sélecteur, fermer Plus d'options, trouver Publier,
+        // cliquer Publier, puis attendre une confirmation réelle. Retour accueil avant Publier = échec.
         text = text.replace(
                 'if("TIKTOK_SCHEDULE_READY".equals(s)||"TIKTOK_RETURN_POST".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){\n          mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour vers l\'écran Publier");\n          return;\n        }\n      }\n      if(click(r,"Publier","Post")){\n        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");\n        return;\n      }\n      return;\n    }',
-                'if("TIKTOK_SCHEDULE_READY".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){mark(t,"TIKTOK_PAUSED","TIKTOK — date/heure non vérifiées après Terminé");return;}\n        mark(t,"TIKTOK_SCHEDULE_VERIFIED","TIKTOK — programmation active et date/heure vérifiées");return;\n      }\n      return;\n    }\n    if("TIKTOK_SCHEDULE_VERIFIED".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){mark(t,"TIKTOK_RETURN_POST","TIKTOK — panneau fermé, retour vers Publier");return;}\n        return;\n      }\n      mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour formulaire principal");return;\n    }\n    if("TIKTOK_RETURN_POST".equals(s)){\n      if(!has(r,"Publier","Post"))return;\n      if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){mark(t,"TIKTOK_PAUSED","TIKTOK — date/heure non vérifiées avant Publier");return;}\n      if(click(r,"Publier","Post")||tapText(r,"Publier","Post")){mark(t,"TIKTOK_CONFIRMING","TIKTOK — Publier validé, attente confirmation TikTok");return;}\n      return;\n    }')
+                'if("TIKTOK_SCHEDULE_READY".equals(s)){\n      if(has(r,"Date et heure de publication","Date and time of publication"))return;\n      mark(t,"TIKTOK_SCHEDULE_VERIFIED","schedule_set");return;\n    }\n    if("TIKTOK_SCHEDULE_VERIFIED".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){failTask(t,"time_selector_failed");return;}\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){mark(t,"TIKTOK_RETURN_POST","verify_schedule_screen_closed");return;}\n        return;\n      }\n      mark(t,"TIKTOK_RETURN_POST","verify_schedule_screen_closed");return;\n    }\n    if("TIKTOK_RETURN_POST".equals(s)){\n      if(has(r,"Publier","Post")){p().edit().remove("publish_wait_"+t.id).apply();if(click(r,"Publier","Post")||tapText(r,"Publier","Post")){mark(t,"TIKTOK_CONFIRMING","publish_clicked");RemoteTaskReporter.progress(this,t,"publish_clicked","publish_clicked");return;}failTask(t,"publish_button_not_found");return;}\n      if(has(r,"Accueil","Home")&&has(r,"Profil","Profile")){failTask(t,"returned_home_before_publish");return;}\n      int pw=p().getInt("publish_wait_"+t.id,0)+1;p().edit().putInt("publish_wait_"+t.id,pw).apply();if(pw>=8){failTask(t,"publish_button_not_found");}return;\n    }')
 
-        // Quand TikTok confirme réellement une vidéo, démarrer seulement alors la vidéo suivante de la file.
+        // Échecs explicites au lieu d'un faux état terminé.
+        text = text.replace(
+                'if(++tries>420){mark(t,"TIKTOK_PAUSED","TIKTOK — délai dépassé");h.removeCallbacks(retry);return;}',
+                'if(++tries>420){failTask(t,"unexpected_tiktok_screen");return;}')
+        text = text.replace(
+                'if(Build.VERSION.SDK_INT<24){mark(t,"TIKTOK_PAUSED","TIKTOK — Android < 24");return;}',
+                'if(Build.VERSION.SDK_INT<24){failTask(t,"time_selector_failed");return;}')
+        text = text.replace(
+                'if(t.scheduledAt<=System.currentTimeMillis()+60000){mark(t,"TIKTOK_PAUSED","TIKTOK — date dépassée ou trop proche");return;}',
+                'if(t.scheduledAt<=System.currentTimeMillis()+60000){failTask(t,"time_selector_failed");return;}')
+
+        // Succès terminal : reporter au MCP, nettoyer la tâche active puis seulement lancer la suivante.
         text = text.replace(
                 'private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);}',
-                'private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);PublicationQueueCoordinator.startNextAfterConfirmed(this);}')
+                'private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);RemoteTaskReporter.completed(this,t,"scheduled_confirmed");p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).remove("done_attempts_"+t.id).remove("publish_wait_"+t.id).apply();h.removeCallbacks(retry);PublicationQueueCoordinator.startNextAfterConfirmed(this);}')
 
-        // Secours tactile : toucher le centre du libellé lu à l'écran quand ACTION_CLICK est refusé.
+        // Helpers : échec terminal et clic exact sur Terminé.
         text = text.replace(
                 'private static boolean click(AccessibilityNodeInfo r,String...ls){',
-                'private boolean tapText(AccessibilityNodeInfo r,String...ls){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}\n  private static boolean click(AccessibilityNodeInfo r,String...ls){')
+                'private void failTask(PublicationTask t,String error){t.status="failed: "+error;PublicationTaskRepository.save(this,t);RemoteTaskReporter.failed(this,t,error);p().edit().remove("active_task_id").putString("last_dispatch_error",error).apply();h.removeCallbacks(retry);}\n  private boolean clickDoneCenter(AccessibilityNodeInfo r){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String label:new String[]{"Terminé","Done"}){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(label);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser()||!n.isClickable())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}\n  private boolean tapText(AccessibilityNodeInfo r,String...ls){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}\n  private static boolean click(AccessibilityNodeInfo r,String...ls){')
 
-        // Pont MCP : démarrage à la connexion du service ET secours au premier événement Accessibility.
+        // Pont MCP actif dans l'AccessibilityService.
         text = text.replace(
                 'public class BotAccessibilityService extends AccessibilityService {',
                 'public class BotAccessibilityService extends AccessibilityService {\n  private SuperBotRemoteBridge remoteBridge;\n  private void ensureRemoteBridge(){if(remoteBridge==null){remoteBridge=new SuperBotRemoteBridge(this);remoteBridge.start();}}\n  @Override protected void onServiceConnected(){super.onServiceConnected();ensureRemoteBridge();}')
@@ -105,13 +124,13 @@ tasks.named('preBuild').configure {
 
         source.write(text, 'UTF-8')
 
-        // Une mission complète peut provenir de ChatGPT : le package source ne doit jamais la bloquer.
-        // La mission est transformée en PublicationTask, puis le bot ouvre lui-même le réseau cible.
+        // submit_publication est accepté même si ChatGPT est au premier plan.
+        // Le commandId suit la mission jusqu'à la confirmation finale TikTok.
         def remoteSource = file('src/main/java/com/chasmet/superbot/SuperBotRemoteBridge.java')
         def remoteText = remoteSource.getText('UTF-8')
         remoteText = remoteText.replace(
                 '} else if (!isAllowedPackage()) {',
-                '} else if ("submit_publication".equals(type)) {\n                    RemotePublicationMission.Result mission = RemotePublicationMission.dispatch(service, payload);\n                    ok = mission.ok;\n                    message = mission.message;\n                } else if (!isAllowedPackage()) {')
+                '} else if ("submit_publication".equals(type)) {\n                    payload.put("_commandId", commandId);\n                    RemotePublicationMission.Result mission = RemotePublicationMission.dispatch(service, payload);\n                    ok = mission.ok;\n                    message = mission.message;\n                } else if (!isAllowedPackage()) {')
         remoteSource.write(remoteText, 'UTF-8')
     }
 }
