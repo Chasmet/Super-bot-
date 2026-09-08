@@ -40,6 +40,7 @@ public final class SuperBotRemoteBridge {
             if (!running) return;
             io.execute(() -> {
                 try {
+                    reportPublications();
                     postState();
                     pollCommands();
                 } catch (Exception ignored) {
@@ -75,9 +76,48 @@ public final class SuperBotRemoteBridge {
         io.shutdownNow();
     }
 
+    private JSONObject activeTask() throws Exception {
+        android.content.SharedPreferences p=PublicationCoordinator.prefs(service);
+        String id=p.getString("active_task_id",p.getString("return_task_id",""));
+        PublicationTask task=PublicationTaskRepository.find(service,id);
+        if(task==null)return null;
+        JSONObject value=new JSONObject();value.put("id",id);value.put("status",task.status);
+        value.put("stage",p.getString("state_"+id,"running"));value.put("scheduledAt",task.scheduledAt);
+        return value;
+    }
+
+    private void reportPublications() {
+        android.content.SharedPreferences p=PublicationCoordinator.prefs(service);
+        for(PublicationTask task:PublicationTaskRepository.load(service)){
+            if(!p.getBoolean("remote_"+task.id,false)||p.getBoolean("reported_"+task.id,false))continue;
+            try{
+                String outcome=p.getString("outcome_"+task.id,"");
+                boolean completed="completed".equals(outcome)&&p.getBoolean("menu_returned_"+task.id,false);
+                boolean cancelled="cancelled".equals(outcome);
+                boolean failed=task.status!=null&&task.status.startsWith("ERREUR");
+                JSONObject report=new JSONObject();report.put("deviceId",DEVICE_ID);report.put("taskId",task.id);
+                report.put("message",task.status);report.put("stage",p.getString("state_"+task.id,"running"));
+                report.put("timestamp",System.currentTimeMillis());
+                if(completed||cancelled||failed){
+                    report.put("ok",completed);report.put("status",completed?"completed":cancelled?"cancelled":"failed");
+                    report.put("confirmation",completed?"tiktok_schedule_confirmed":"");
+                    report.put("menuReturned",p.getBoolean("menu_returned_"+task.id,false));
+                    postJson(BASE_URL+"/device/commands/"+task.id+"/result",report);
+                    p.edit().putBoolean("reported_"+task.id,true).apply();
+                }else{
+                    report.put("status", "TIKTOK_PAUSED".equals(report.optString("stage"))?"paused":"running");
+                    postJson(BASE_URL+"/device/commands/"+task.id+"/progress",report);
+                }
+            }catch(Exception ignored){/* Durable preferences retain unacknowledged results. */}
+        }
+    }
+
     private void postState() throws Exception {
         JSONObject state = new JSONObject();
         state.put("deviceId", DEVICE_ID);
+        JSONObject active=activeTask();
+        state.put("activeTask", active==null?JSONObject.NULL:active);
+        state.put("appVersion", service.getPackageManager().getPackageInfo(service.getPackageName(),0).versionName);
         state.put("awake", PublicationAlarmReceiver.isSuperBotAwake(service));
 
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
@@ -94,7 +134,7 @@ public final class SuperBotRemoteBridge {
             state.put("packageName", pkg == null ? JSONObject.NULL : pkg.toString());
             JSONArray nodes = new JSONArray();
             StringBuilder screenText = new StringBuilder();
-            collect(root, nodes, screenText, 0);
+            if(isAllowedPackage())collect(root, nodes, screenText, 0);
             state.put("nodes", nodes);
             state.put("screenText", screenText.toString());
         } finally {
@@ -120,6 +160,7 @@ public final class SuperBotRemoteBridge {
             item.put("editable", node.isEditable());
             item.put("enabled", node.isEnabled());
             item.put("visible", node.isVisibleToUser());
+            item.put("selected", node.isSelected());
             item.put("left", bounds.left);
             item.put("top", bounds.top);
             item.put("right", bounds.right);
@@ -173,6 +214,25 @@ public final class SuperBotRemoteBridge {
             try {
                 if (!PublicationAlarmReceiver.isSuperBotAwake(service)) {
                     message = "superbot_disconnected";
+                } else if ("submit_publication".equals(type)) {
+                    RemotePublicationMission.Result mission=RemotePublicationMission.dispatch(service,payload,commandId);
+                    if(mission.ok){return;} // Progress and final outcome are reported independently, never dispatch=completed.
+                    ok=false;message=mission.message;
+                } else if ("resume_publication".equals(type)) {
+                    String id=PublicationCoordinator.prefs(service).getString("active_task_id","");
+                    PublicationTask task=PublicationTaskRepository.find(service,id);
+                    ok=task!=null&&PublicationAlarmReceiver.resumeTarget(service,task);
+                    message=ok?"target_reopened":"no_active_publication";
+                } else if ("cancel".equals(type)) {
+                    String id=payload.optString("commandId","");
+                    if(id.isEmpty())id=PublicationCoordinator.prefs(service).getString("active_task_id","");
+                    PublicationTask task=PublicationTaskRepository.find(service,id);
+                    ok=task!=null;
+                    if(ok){
+                        PublicationCoordinator.prefs(service).edit().putString("state_"+id,"TIKTOK_PAUSED").putString("outcome_"+id,"cancelled").apply();
+                        task.status="ANNULÉ • file arrêtée";PublicationTaskRepository.save(service,task);
+                    }
+                    message=ok?"cancel_received":"task_not_found";
                 } else if (!isAllowedPackage()) {
                     message = "package_not_allowed";
                 } else {
@@ -197,10 +257,6 @@ public final class SuperBotRemoteBridge {
                         case "back":
                             ok = service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
                             message = ok ? "back_done" : "back_failed";
-                            break;
-                        case "cancel":
-                            ok = true;
-                            message = "cancel_received";
                             break;
                         default:
                             message = "unsupported_command:" + type;

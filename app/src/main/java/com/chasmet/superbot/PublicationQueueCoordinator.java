@@ -29,9 +29,9 @@ public final class PublicationQueueCoordinator {
 
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String activeId = prefs.getString(ACTIVE, "");
-        if (activeId == null || activeId.isEmpty()) {
+        if (!PublicationCoordinator.busy(context)) {
             boolean started = PublicationAlarmReceiver.dispatchNow(context, task);
-            if (started) return new EnqueueResult(true, true, "publication_dispatched:" + task.id + ":" + task.platform);
+            if (started) return new EnqueueResult(true, true, "publication_running:" + task.id + ":" + task.platform);
 
             PublicationTask latest = PublicationTaskRepository.find(context, task.id);
             String status = latest == null ? task.status : latest.status;
@@ -50,7 +50,7 @@ public final class PublicationQueueCoordinator {
         if (context == null) return;
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String activeId = prefs.getString(ACTIVE, "");
-        if (activeId != null && !activeId.isEmpty()) return;
+        if (PublicationCoordinator.busy(context)) return;
 
         for (PublicationTask task : PublicationTaskRepository.load(context)) {
             if (task.status != null && task.status.startsWith(QUEUED_PREFIX)) {
@@ -67,6 +67,7 @@ public final class PublicationQueueCoordinator {
         int count = 0;
         String active = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(ACTIVE, "");
         if (active != null && !active.isEmpty()) count++;
+        if (!PublicationCoordinator.prefs(context).getString("return_task_id", "").isEmpty()) count++;
         count += queuedCount(context);
         return count;
     }

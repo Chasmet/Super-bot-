@@ -10,8 +10,8 @@ android {
         applicationId 'com.chasmet.superbot'
         minSdk 21
         targetSdk 34
-        versionCode 34
-        versionName '1.3.21'
+        versionCode 35
+        versionName '1.3.22'
     }
 
     signingConfigs {
@@ -37,80 +37,4 @@ android {
 
 dependencies {
     implementation 'androidx.core:core:1.13.1'
-}
-
-// Correctifs TikTok ciblés + pont MCP Render.
-tasks.named('preBuild').configure {
-    doFirst {
-        def source = file('src/main/java/com/chasmet/superbot/BotAccessibilityService.java')
-        def text = source.getText('UTF-8')
-
-        // Accepte les deux packages TikTok connus, ainsi que les variantes prévues pour les autres réseaux.
-        text = text.replace(
-                'String pkg=PublicationAlarmReceiver.packageFor(t.platform);\n    if(pkg==null||!pkg.equals(e.getPackageName().toString())||System.currentTimeMillis()-last<430)return;',
-                'if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,e.getPackageName())||System.currentTimeMillis()-last<430)return;')
-        text = text.replace(
-                'String pkg=PublicationAlarmReceiver.packageFor(t.platform);\n      if(r.getPackageName()==null||pkg==null||!pkg.equals(r.getPackageName().toString()))return;',
-                'if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,r.getPackageName()))return;')
-
-        // Roue des minutes selon le cheminement observé sur TikTok.
-        text = text.replace(
-                'wheel(r,c.m,dir(minute,wm,60),t,"minutes → "+two(wm))',
-                'wheel(r,c.m,(wm<=30?-1:1),t,"minutes → "+two(wm))')
-        text = text.replace(
-                'int ms=dist(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60);',
-                'int tm=target.get(Calendar.MINUTE),cm=now.get(Calendar.MINUTE); int ms=tm<=30?(cm-tm+60)%60:(tm-cm+60)%60;')
-        text = text.replace(
-                '.putInt(k+"md",dir(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60))',
-                '.putInt(k+"md",target.get(Calendar.MINUTE)<=30?-1:1)')
-
-        // Confirmation finale : ne considérer la mission comme terminée qu'après un retour explicite de TikTok.
-        text = text.replace(
-                'if("TIKTOK_CONFIRMING".equals(s)&&has(r,"publication programmée","post scheduled","scheduled")){finish(t,"PROGRAMMÉ");return;}',
-                'if("TIKTOK_CONFIRMING".equals(s)&&TikTokScheduleVerifier.accepted(r)){finish(t,"PROGRAMMÉ");return;}')
-
-        // Si le bouton Terminé est affiché après validation des roues, le bot doit le valider.
-        text = text.replace(
-                'if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}',
-                'if("TIKTOK_SCHEDULE_READY".equals(s)&&has(r,"Date et heure de publication","Date and time of publication")){if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — Terminé validé");}return;} if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}')
-        text = text.replace(
-                'if(click(r,"Terminé","Done"))mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées");return;',
-                'if(click(r,"Terminé","Done")||tapText(r,"Terminé","Done")){mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — jour, heure et minutes validés • Terminé");h.removeCallbacks(retry);h.postDelayed(retry,900);}else{mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — valeurs correctes, recherche Terminé");}return;')
-
-        // Parcours complet après Terminé : vérifier la programmation, revenir au formulaire, puis Publier.
-        text = text.replace(
-                'if("TIKTOK_SCHEDULE_READY".equals(s)||"TIKTOK_RETURN_POST".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){\n          mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour vers l\'écran Publier");\n          return;\n        }\n      }\n      if(click(r,"Publier","Post")){\n        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");\n        return;\n      }\n      return;\n    }',
-                'if("TIKTOK_SCHEDULE_READY".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){mark(t,"TIKTOK_PAUSED","TIKTOK — date/heure non vérifiées après Terminé");return;}\n        mark(t,"TIKTOK_SCHEDULE_VERIFIED","TIKTOK — programmation active et date/heure vérifiées");return;\n      }\n      return;\n    }\n    if("TIKTOK_SCHEDULE_VERIFIED".equals(s)){\n      if(has(r,"Plus d’options","Plus d\'options","More options")||has(r,"Programmer la publication","Schedule post")){\n        if(performGlobalAction(GLOBAL_ACTION_BACK)){mark(t,"TIKTOK_RETURN_POST","TIKTOK — panneau fermé, retour vers Publier");return;}\n        return;\n      }\n      mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour formulaire principal");return;\n    }\n    if("TIKTOK_RETURN_POST".equals(s)){\n      if(!has(r,"Publier","Post"))return;\n      if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){mark(t,"TIKTOK_PAUSED","TIKTOK — date/heure non vérifiées avant Publier");return;}\n      if(click(r,"Publier","Post")||tapText(r,"Publier","Post")){mark(t,"TIKTOK_CONFIRMING","TIKTOK — Publier validé, attente confirmation TikTok");return;}\n      return;\n    }')
-
-        // Quand TikTok confirme réellement une vidéo, démarrer seulement alors la vidéo suivante de la file.
-        text = text.replace(
-                'private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);}',
-                'private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);PublicationQueueCoordinator.startNextAfterConfirmed(this);}')
-
-        // Secours tactile : toucher le centre du libellé lu à l'écran quand ACTION_CLICK est refusé.
-        text = text.replace(
-                'private static boolean click(AccessibilityNodeInfo r,String...ls){',
-                'private boolean tapText(AccessibilityNodeInfo r,String...ls){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}\n  private static boolean click(AccessibilityNodeInfo r,String...ls){')
-
-        // Pont MCP : démarrage à la connexion du service ET secours au premier événement Accessibility.
-        text = text.replace(
-                'public class BotAccessibilityService extends AccessibilityService {',
-                'public class BotAccessibilityService extends AccessibilityService {\n  private SuperBotRemoteBridge remoteBridge;\n  private void ensureRemoteBridge(){if(remoteBridge==null){remoteBridge=new SuperBotRemoteBridge(this);remoteBridge.start();}}\n  @Override protected void onServiceConnected(){super.onServiceConnected();ensureRemoteBridge();}')
-        text = text.replace(
-                '@Override public void onAccessibilityEvent(AccessibilityEvent e){',
-                '@Override public void onAccessibilityEvent(AccessibilityEvent e){\n    ensureRemoteBridge();')
-        text = text.replace(
-                '@Override public void onDestroy(){h.removeCallbacksAndMessages(null);super.onDestroy();}',
-                '@Override public void onDestroy(){if(remoteBridge!=null){remoteBridge.stop();remoteBridge=null;}h.removeCallbacksAndMessages(null);super.onDestroy();}')
-
-        source.write(text, 'UTF-8')
-
-        // Une mission complète peut provenir de ChatGPT : le package source ne doit jamais la bloquer.
-        def remoteSource = file('src/main/java/com/chasmet/superbot/SuperBotRemoteBridge.java')
-        def remoteText = remoteSource.getText('UTF-8')
-        remoteText = remoteText.replace(
-                '} else if (!isAllowedPackage()) {',
-                '} else if ("submit_publication".equals(type)) {\n                    RemotePublicationMission.Result mission = RemotePublicationMission.dispatch(service, payload);\n                    ok = mission.ok;\n                    message = mission.message;\n                } else if (!isAllowedPackage()) {')
-        remoteSource.write(remoteText, 'UTF-8')
-    }
 }

@@ -33,6 +33,9 @@ public class MainActivity extends Activity {
         super.onResume();
         McpConnectionService.start(this);
         refreshBotChef();
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if(!isFinishing())PublicationCoordinator.menuReached(this);
+        },1200);
     }
 
     private void refreshBotChef() {
@@ -50,7 +53,7 @@ public class MainActivity extends Activity {
             String status = task.status == null ? "" : task.status.trim();
             String upper = status.toUpperCase();
             boolean error = upper.contains("ERREUR") || upper.contains("FAILED") || upper.contains("INTRouvable".toUpperCase());
-            boolean done = upper.contains("PROGRAMMATION ENVOYÉE") || upper.contains("PUBLIÉ") || upper.contains("TERMINÉ");
+            boolean done = "completed".equals(PublicationCoordinator.prefs(this).getString("outcome_"+task.id,""));
             if (error) {
                 errors++;
                 if (lastError.isEmpty()) lastError = status;
