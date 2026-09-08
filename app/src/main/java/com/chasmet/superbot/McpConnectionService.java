@@ -71,11 +71,13 @@ public final class McpConnectionService extends Service {
         super.onCreate();
         createChannel();
         startForeground(NOTIFICATION_ID, notification("Connexion MCP Render en cours…"));
+        PublicationQueueCoordinator.recoverIfIdle(this);
         executor = Executors.newSingleThreadScheduledExecutor();
         executor.scheduleWithFixedDelay(this::heartbeat, 0, 5, TimeUnit.SECONDS);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        PublicationQueueCoordinator.recoverIfIdle(this);
         return START_STICKY;
     }
 
@@ -100,6 +102,7 @@ public final class McpConnectionService extends Service {
             payload.put("bridgeMode", "mcp_persistent");
             postJson(BASE_URL + "/device/register", payload);
             saveState(this, true, "");
+            PublicationQueueCoordinator.recoverIfIdle(this);
             updateNotification("MCP connecté à Render • " + version);
         } catch (Exception e) {
             saveState(this, false, e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
