@@ -23,15 +23,17 @@ public final class RemotePublicationMission {
             task.description = payload.optString("description", "");
             task.hashtags = payload.optString("hashtags", "");
             task.visibility = payload.optString("visibility", "Public");
+            task.remoteCommandId = payload.optString("_commandId", "");
             long when = payload.optLong("scheduledAt", System.currentTimeMillis());
             if (when > 0 && when < 100000000000L) when *= 1000L;
             task.scheduledAt = when;
-            task.status = "MISSION MCP • reçue";
+            task.status = "queued";
             PublicationTaskRepository.save(context, task);
 
             if (task.videoPath == null || task.videoPath.isEmpty() || !new File(task.videoPath).exists()) {
-                task.status = "ERREUR MCP • vidéo introuvable";
+                task.status = "failed: media_not_found";
                 PublicationTaskRepository.save(context, task);
+                RemoteTaskReporter.failed(context, task, "media_not_found");
                 return new Result(false, "media_not_found:" + task.id);
             }
 
