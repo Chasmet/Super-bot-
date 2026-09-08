@@ -11,10 +11,21 @@ final class TikTokScheduleVerifier {
     }
     static boolean acceptedText(String text){return TikTokTextPolicy.accepted(text);}
     static boolean accepted(AccessibilityNodeInfo root){
+        if(root==null)return false;
+        // A scheduling label still displayed in the composer is not a receipt.
+        for(String label:new String[]{"Publier","Post","Terminé","Done","Programmer la publication","Schedule post"}){
+            java.util.List<AccessibilityNodeInfo> nodes=root.findAccessibilityNodeInfosByText(label);
+            if(nodes==null)continue;
+            try{for(AccessibilityNodeInfo n:nodes)if(n.isVisibleToUser()&&TikTokTextPolicy.normalize(label(n)).equals(TikTokTextPolicy.normalize(label)))return false;}
+            finally{for(AccessibilityNodeInfo n:nodes)n.recycle();}
+        }
+        return acceptedMessage(root);
+    }
+    private static boolean acceptedMessage(AccessibilityNodeInfo root){
         if(root==null||!root.isVisibleToUser()||root.isEditable())return false;
         if(acceptedText(label(root)))return true;
         for(int i=0;i<root.getChildCount();i++){
-            AccessibilityNodeInfo c=root.getChild(i);if(c!=null){boolean ok=accepted(c);c.recycle();if(ok)return true;}
+            AccessibilityNodeInfo c=root.getChild(i);if(c!=null){boolean ok=acceptedMessage(c);c.recycle();if(ok)return true;}
         }return false;
     }
     static boolean scheduleSummaryMatches(AccessibilityNodeInfo root,long when){
