@@ -117,7 +117,7 @@ public final class SuperBotRemoteBridge {
         state.put("deviceId", DEVICE_ID);
         JSONObject active=activeTask();
         state.put("activeTask", active==null?JSONObject.NULL:active);
-        state.put("appVersion", "1.3.21");
+        state.put("appVersion", service.getPackageManager().getPackageInfo(service.getPackageName(),0).versionName);
         state.put("awake", PublicationAlarmReceiver.isSuperBotAwake(service));
 
         AccessibilityNodeInfo root = service.getRootInActiveWindow();

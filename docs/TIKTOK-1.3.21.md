@@ -1,4 +1,4 @@
-# Super Bot 1.3.21 — programmation séquentielle
+# Super Bot 1.3.22 — programmation séquentielle
 
 Parcours : métadonnées vérifiées → Plus d'options → date → heure → minutes → deux lectures stables → Terminé → résumé de programmation vérifié → Publier une seule fois → confirmation explicite TikTok → menu Super Bot → mission suivante.
 
