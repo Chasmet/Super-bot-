@@ -49,6 +49,7 @@ public final class PublicationTaskRepository {
                 t.visibility = o.optString("visibility", "Public");
                 t.scheduledAt = o.optLong("scheduledAt", 0L);
                 t.status = o.optString("status", "PROGRAMMÉ");
+                t.remoteCommandId = o.optString("remoteCommandId", "");
                 result.add(t);
             }
         } catch (Exception ignored) {}
@@ -82,6 +83,7 @@ public final class PublicationTaskRepository {
                 o.put("visibility", t.visibility);
                 o.put("scheduledAt", t.scheduledAt);
                 o.put("status", t.status);
+                o.put("remoteCommandId", t.remoteCommandId == null ? "" : t.remoteCommandId);
                 array.put(o);
             } catch (Exception ignored) {}
         }
