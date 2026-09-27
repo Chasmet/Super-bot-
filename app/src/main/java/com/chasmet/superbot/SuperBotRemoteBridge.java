@@ -79,6 +79,13 @@ public final class SuperBotRemoteBridge {
         JSONObject state = new JSONObject();
         state.put("deviceId", DEVICE_ID);
         state.put("awake", PublicationAlarmReceiver.isSuperBotAwake(service));
+        if (!PublicationAlarmReceiver.isSuperBotAwake(service)) {
+            state.put("packageName", JSONObject.NULL);
+            state.put("screenText", "");
+            state.put("nodes", new JSONArray());
+            postJson(BASE_URL + "/device/state", state);
+            return;
+        }
 
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
         if (root == null) {
@@ -91,7 +98,14 @@ public final class SuperBotRemoteBridge {
 
         try {
             CharSequence pkg = root.getPackageName();
-            state.put("packageName", pkg == null ? JSONObject.NULL : pkg.toString());
+            String packageName = pkg == null ? "" : pkg.toString();
+            state.put("packageName", packageName);
+            if (!isAllowedPackageName(packageName)) {
+                state.put("nodes", new JSONArray());
+                state.put("screenText", "");
+                postJson(BASE_URL + "/device/state", state);
+                return;
+            }
             JSONArray nodes = new JSONArray();
             StringBuilder screenText = new StringBuilder();
             collect(root, nodes, screenText, 0);
@@ -164,6 +178,16 @@ public final class SuperBotRemoteBridge {
 
     private void execute(JSONObject command) {
         final String commandId = command.optString("id", "");
+        if (commandId.isEmpty()) return;
+        String cached = service.getSharedPreferences("superbot_remote_results", 0)
+                .getString(commandId, null);
+        if (cached != null) {
+            try {
+                postJson(BASE_URL + "/device/commands/" + commandId + "/result", new JSONObject(cached));
+                service.getSharedPreferences("superbot_remote_results", 0).edit().remove(commandId).apply();
+            } catch (Exception ignored) { }
+            return;
+        }
         final String type = command.optString("type", "");
         final JSONObject payload = command.optJSONObject("payload") == null ? new JSONObject() : command.optJSONObject("payload");
 
@@ -171,8 +195,16 @@ public final class SuperBotRemoteBridge {
             boolean ok = false;
             String message;
             try {
-                if (!PublicationAlarmReceiver.isSuperBotAwake(service)) {
+                if ("cancel".equals(type)) {
+                    ok = cancelMission(payload.optString("commandId", ""));
+                    message = ok ? "mission_cancelled" : "mission_not_found";
+                } else if (!PublicationAlarmReceiver.isSuperBotAwake(service)) {
                     message = "superbot_disconnected";
+                } else if ("submit_publication".equals(type)) {
+                    payload.put("_commandId", commandId);
+                    RemotePublicationMission.Result mission = RemotePublicationMission.dispatch(service, payload);
+                    ok = mission.ok;
+                    message = mission.message;
                 } else if (!isAllowedPackage()) {
                     message = "package_not_allowed";
                 } else {
@@ -198,10 +230,6 @@ public final class SuperBotRemoteBridge {
                             ok = service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
                             message = ok ? "back_done" : "back_failed";
                             break;
-                        case "cancel":
-                            ok = true;
-                            message = "cancel_received";
-                            break;
                         default:
                             message = "unsupported_command:" + type;
                     }
@@ -211,7 +239,8 @@ public final class SuperBotRemoteBridge {
             }
             final boolean resultOk = ok;
             final String resultMessage = message;
-            io.execute(() -> sendResult(commandId, resultOk, resultMessage));
+            io.execute(() -> sendResult(commandId, resultOk, resultMessage,
+                    "submit_publication".equals(type) && resultOk ? "accepted" : null));
         });
     }
 
@@ -220,15 +249,38 @@ public final class SuperBotRemoteBridge {
         if (root == null) return false;
         try {
             String pkg = root.getPackageName() == null ? "" : root.getPackageName().toString();
+            return isAllowedPackageName(pkg);
+        } finally {
+            root.recycle();
+        }
+    }
+
+    private static boolean isAllowedPackageName(String pkg) {
             return pkg.equals("com.zhiliaoapp.musically")
                     || pkg.equals("com.ss.android.ugc.trill")
                     || pkg.equals("com.instagram.android")
                     || pkg.equals("com.google.android.youtube")
                     || pkg.equals("com.twitter.android")
                     || pkg.equals("com.x.android");
-        } finally {
-            root.recycle();
+    }
+
+    private boolean cancelMission(String targetCommandId) {
+        if (targetCommandId == null || targetCommandId.isEmpty()) return false;
+        for (PublicationTask task : PublicationTaskRepository.load(service)) {
+            if (!targetCommandId.equals(task.remoteCommandId)) continue;
+            String state = task.status == null ? "" : task.status.toLowerCase(Locale.ROOT);
+            if (state.startsWith("completed") || state.startsWith("failed")) return false;
+            task.status = "failed: cancelled_by_user";
+            PublicationTaskRepository.save(service, task);
+            RemoteTaskReporter.failed(service, task, "cancelled_by_user");
+            android.content.SharedPreferences prefs = service.getSharedPreferences("superbot_bot_state", android.content.Context.MODE_PRIVATE);
+            if (task.id.equals(prefs.getString("active_task_id", ""))) {
+                prefs.edit().remove("active_task_id").apply();
+                PublicationQueueCoordinator.startNextAfterConfirmed(service);
+            }
+            return true;
         }
+        return false;
     }
 
     private boolean clickText(String wanted) {
@@ -292,14 +344,18 @@ public final class SuperBotRemoteBridge {
         return service.dispatchGesture(gesture, null, null);
     }
 
-    private void sendResult(String commandId, boolean ok, String message) {
+    private void sendResult(String commandId, boolean ok, String message, String phase) {
         if (commandId == null || commandId.isEmpty()) return;
         try {
             JSONObject result = new JSONObject();
             result.put("ok", ok);
             result.put("message", message);
+            if (phase != null) result.put("phase", phase);
             result.put("timestamp", System.currentTimeMillis());
+            service.getSharedPreferences("superbot_remote_results", 0)
+                    .edit().putString(commandId, result.toString()).apply();
             postJson(BASE_URL + "/device/commands/" + commandId + "/result", result);
+            service.getSharedPreferences("superbot_remote_results", 0).edit().remove(commandId).apply();
         } catch (Exception ignored) {
         }
     }

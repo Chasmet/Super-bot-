@@ -36,12 +36,19 @@ jobs:
         with:
           path: ~/.android/debug.keystore
           key: superbot-debug-keystore-v1
-          fail-on-cache-miss: true
+          fail-on-cache-miss: false
 
       - name: Verify signing key exists
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
-          test -f ~/.android/debug.keystore
+          if [ ! -f ~/.android/debug.keystore ]; then
+            if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+              echo "Clé de signature d'origine absente : publication interdite pour protéger les données installées."
+              exit 1
+            fi
+            echo "Clé d'origine absente sur cette PR : compilation de test avec la clé Android temporaire."
+            exit 0
+          fi
           keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey >/dev/null
           cp ~/.android/debug.keystore "$RUNNER_TEMP/superbot.keystore"
           chmod 600 "$RUNNER_TEMP/superbot.keystore"
@@ -49,11 +56,9 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
 
       - name: Build and audit debug APK
-        run: gradle assembleDebug lintDebug
+        run: ./gradlew assembleDebug lintDebug
 
       - name: Prepare APK name
         id: version
@@ -64,7 +69,7 @@ jobs:
 
       - name: Write installation warning
         run: |
-          echo "APK DE TEST : ne pas désinstaller la version existante. La compatibilité avec 1.2.1 est vérifiée séparément ; cet artifact ne constitue pas une mise à jour validée." > INSTALLATION.txt
+          echo "APK de test : ne désinstalle pas la version existante. La signature est comparée avec la version 1.2.5 avant toute Release." > INSTALLATION.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -75,7 +80,7 @@ jobs:
             INSTALLATION.txt
 
       - name: Verify compatibility with installed 1.2.5
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

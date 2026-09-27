@@ -5,6 +5,7 @@ const PORT = Number(process.env.PORT || 10000);
 const devices = new Map();
 const queues = new Map();
 const commands = new Map();
+const LEASE_MS = 30_000;
 
 function json(res, status, body, extraHeaders = {}) {
   const data = JSON.stringify(body);
@@ -60,6 +61,19 @@ function enqueue(deviceId, type, payload = {}) {
   commands.set(cmd.id, cmd);
   getQueue(deviceId).push(cmd);
   return cmd;
+}
+
+function deliver(deviceId) {
+  const now = Date.now();
+  const pending = getQueue(deviceId);
+  const cmd = pending.find(c => c.type === 'cancel' && c.status === 'queued')
+    || pending.find(c => c.status === 'queued'
+    || (c.status === 'delivered' && now - c.deliveredAt >= LEASE_MS));
+  if (!cmd) return [];
+  cmd.status = 'delivered';
+  cmd.deliveredAt = now;
+  cmd.attempts = (cmd.attempts || 0) + 1;
+  return [cmd];
 }
 
 function toolText(value) {
@@ -241,12 +255,7 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/device/commands' && req.method === 'GET') {
       const deviceId = url.searchParams.get('deviceId') || 'superbot-phone';
-      const q = getQueue(deviceId);
-      const out = q.splice(0, 8).map(c => {
-        c.status = 'delivered';
-        c.deliveredAt = Date.now();
-        return c;
-      });
+      const out = deliver(deviceId);
       const d = getDevice(deviceId);
       d.lastSeen = Date.now();
       d.online = true;
@@ -257,10 +266,24 @@ const server = http.createServer(async (req, res) => {
     if (m && req.method === 'POST') {
       const c = commands.get(m[1]);
       if (!c) return json(res, 404, { error: 'command_not_found' });
+      if (c.status === 'completed' || c.status === 'failed') {
+        return json(res, 200, { ok: true, status: c.status });
+      }
       const b = await body(req);
-      c.status = b.ok === false ? 'failed' : 'completed';
+      // La réception d'une mission de publication ne prouve pas sa publication.
+      // Le téléphone communique ensuite les progrès puis la confirmation finale.
+      const phase = b.phase;
+      c.status = b.ok === false || phase === 'failed' ? 'failed'
+        : phase === 'accepted' || phase === 'queued' || phase === 'android_started'
+          || phase === 'tiktok_opened' || phase === 'publish_clicked' ? 'in_progress'
+          : 'completed';
       c.result = b;
-      c.completedAt = Date.now();
+      if (c.status === 'completed' || c.status === 'failed') {
+        c.completedAt = Date.now();
+        const queue = getQueue(c.deviceId);
+        const index = queue.indexOf(c);
+        if (index >= 0) queue.splice(index, 1);
+      }
       const d = getDevice(c.deviceId);
       d.lastSeen = Date.now();
       d.online = true;

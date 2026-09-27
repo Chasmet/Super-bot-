@@ -14,6 +14,9 @@ import java.util.*;
 
 @SuppressLint("NewApi")
 public class BotAccessibilityService extends AccessibilityService {
+  private SuperBotRemoteBridge remoteBridge;
+  private void ensureRemoteBridge(){if(remoteBridge==null){remoteBridge=new SuperBotRemoteBridge(this);remoteBridge.start();}}
+  @Override protected void onServiceConnected(){super.onServiceConnected();ensureRemoteBridge();}
   private long last; private int tries; private String active="";
   private final android.os.Handler h=new android.os.Handler(android.os.Looper.getMainLooper());
   private final Runnable retry=this::tick;
@@ -21,11 +24,11 @@ public class BotAccessibilityService extends AccessibilityService {
   private boolean awake(){return PublicationAlarmReceiver.isSuperBotAwake(this);}
 
   @Override public void onAccessibilityEvent(AccessibilityEvent e){
+    ensureRemoteBridge();
     if(!awake()||e==null||e.getPackageName()==null)return;
     String id=p().getString("active_task_id",""); if(id.isEmpty())return;
     PublicationTask t=PublicationTaskRepository.find(this,id); if(t==null)return;
-    String pkg=PublicationAlarmReceiver.packageFor(t.platform);
-    if(pkg==null||!pkg.equals(e.getPackageName().toString())||System.currentTimeMillis()-last<430)return;
+    if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,e.getPackageName())||System.currentTimeMillis()-last<430)return;
     h.removeCallbacks(retry);process(t);h.postDelayed(retry,760);
   }
   private void tick(){
@@ -36,45 +39,48 @@ public class BotAccessibilityService extends AccessibilityService {
   }
   private void process(PublicationTask t){
     if(!t.id.equals(active)){active=t.id;tries=0;clearPicker(t.id);}
-    if(++tries>420){mark(t,"TIKTOK_PAUSED","TIKTOK — délai dépassé");h.removeCallbacks(retry);return;}
+    if(++tries>420){failTask(t,"unexpected_tiktok_screen");return;}
     AccessibilityNodeInfo r=getRootInActiveWindow();if(r==null)return;
     try{
-      String pkg=PublicationAlarmReceiver.packageFor(t.platform);
-      if(r.getPackageName()==null||pkg==null||!pkg.equals(r.getPackageName().toString()))return;
-      if(isTikTok(t))tikTok(r,t);else generic(r,t);
+      if(!TikTokScheduleVerifier.matchesTargetPackage(t.platform,r.getPackageName()))return;
+      if(isTikTok(t)){if("android_started".equals(t.status)){t.status="tiktok_opened";PublicationTaskRepository.save(this,t);RemoteTaskReporter.progress(this,t,"tiktok_opened","tiktok_opened");}tikTok(r,t);}else generic(r,t);
     }finally{r.recycle();}
   }
   private void tikTok(AccessibilityNodeInfo r,PublicationTask t){
     String s=state(t.id);if("TIKTOK_PAUSED".equals(s))return;
-    if("TIKTOK_CONFIRMING".equals(s)&&has(r,"publication programmée","post scheduled","scheduled")){finish(t,"PROGRAMMÉ");return;}
-    if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}
+    if("TIKTOK_CONFIRMING".equals(s)&&TikTokScheduleVerifier.accepted(r)){finish(t,"completed: scheduled_confirmed");return;}
+    if("TIKTOK_SCHEDULE_READY".equals(s)&&has(r,"Date et heure de publication","Date and time of publication")){int da=p().getInt("done_attempts_"+t.id,0);if(da>=3){failTask(t,"done_click_failed");return;}if(clickDoneCenter(r)){p().edit().putInt("done_attempts_"+t.id,da+1).apply();mark(t,"TIKTOK_SCHEDULE_READY","done_clicked");h.removeCallbacks(retry);h.postDelayed(retry,500);}else{failTask(t,"done_button_not_found");}return;} if(has(r,"Date et heure de publication","Date and time of publication")){picker(r,t);return;}
 
     // Une fois les roues validées, TikTok revient sur la feuille "Plus d'options".
     // Il faut la fermer avant d'appuyer sur Publier. Sinon le bot réouvre l'horloge en boucle.
-    if("TIKTOK_SCHEDULE_READY".equals(s)||"TIKTOK_RETURN_POST".equals(s)){
+    if("TIKTOK_SCHEDULE_READY".equals(s)){
+      if(has(r,"Date et heure de publication","Date and time of publication"))return;
+      mark(t,"TIKTOK_SCHEDULE_VERIFIED","schedule_set");return;
+    }
+    if("TIKTOK_SCHEDULE_VERIFIED".equals(s)){
       if(has(r,"Plus d’options","Plus d'options","More options")||has(r,"Programmer la publication","Schedule post")){
-        if(performGlobalAction(GLOBAL_ACTION_BACK)){
-          mark(t,"TIKTOK_RETURN_POST","TIKTOK — retour vers l'écran Publier");
-          return;
-        }
-      }
-      if(click(r,"Publier","Post")){
-        mark(t,"TIKTOK_CONFIRMING","TIKTOK — programmation envoyée");
+        if(!TikTokScheduleVerifier.scheduleSummaryMatches(r,t.scheduledAt)){failTask(t,"time_selector_failed");return;}
+        if(performGlobalAction(GLOBAL_ACTION_BACK)){mark(t,"TIKTOK_RETURN_POST","verify_schedule_screen_closed");return;}
         return;
       }
-      return;
+      mark(t,"TIKTOK_RETURN_POST","verify_schedule_screen_closed");return;
+    }
+    if("TIKTOK_RETURN_POST".equals(s)){
+      if(has(r,"Publier","Post")){p().edit().remove("publish_wait_"+t.id).apply();if(click(r,"Publier","Post")||tapText(r,"Publier","Post")){mark(t,"TIKTOK_CONFIRMING","publish_clicked");RemoteTaskReporter.progress(this,t,"publish_clicked","publish_clicked");return;}failTask(t,"publish_button_not_found");return;}
+      if(has(r,"Accueil","Home")&&has(r,"Profil","Profile")){failTask(t,"returned_home_before_publish");return;}
+      int pw=p().getInt("publish_wait_"+t.id,0)+1;p().edit().putInt("publish_wait_"+t.id,pw).apply();if(pw>=8){failTask(t,"publish_button_not_found");}return;
     }
 
-    if(has(r,"Ta Story","Your Story")&&click(r,"Suivant","Next")){mark(t,"TIKTOK_NEXT","TIKTOK — Suivant");return;}
-    if(has(r,"Programmer la publication","Schedule post")&&schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte");return;}
+    if(has(r,"Ta Story","Your Story")&&click(r,"Suivant","Next")){mark(t,"TIKTOK_NEXT","media_selected");return;}
+    if(has(r,"Programmer la publication","Schedule post")&&schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","schedule_opened");return;}
     boolean post=has(r,"Publier","Post","Brouillons","Drafts")||has(r,"Ajouter un lien","Add link")||has(r,"Plus d’options","Plus d'options","More options");
     if(post){
-      if(!p().getBoolean("meta_ok_"+t.id,false)){if(!meta(r,t))return;mark(t,"TIKTOK_METADATA","TIKTOK — métadonnées vérifiées");return;}
-      if(click(r,"Plus d’options","Plus d'options","More options")){mark(t,"TIKTOK_MORE_OPTIONS","TIKTOK — Plus d'options");return;}
+      if(!p().getBoolean("meta_ok_"+t.id,false)){if(!meta(r,t))return;mark(t,"TIKTOK_METADATA","metadata_filled");return;}
+      if(click(r,"Plus d’options","Plus d'options","More options")){mark(t,"TIKTOK_MORE_OPTIONS","open_more_options");return;}
       if(scroll(r)||swipeUp()){mark(t,"TIKTOK_FIND_MORE_OPTIONS","TIKTOK — recherche Plus d'options");return;}
     }
     if("TIKTOK_MORE_OPTIONS".equals(s)||"TIKTOK_FIND_SCHEDULE".equals(s)||"TIKTOK_FIND_MORE_OPTIONS".equals(s)){
-      if(schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","TIKTOK — programmation ouverte");return;}
+      if(schedule(r)){clearPicker(t.id);mark(t,"TIKTOK_SCHEDULE_OPEN","schedule_opened");return;}
       if(scroll(r)||swipeUp()){mark(t,"TIKTOK_FIND_SCHEDULE","TIKTOK — recherche programmation");return;}
     }
     if(click(r,"Suivant","Next","Continuer","Continue"))mark(t,"TIKTOK_NEXT","TIKTOK — navigation");
@@ -101,8 +107,8 @@ public class BotAccessibilityService extends AccessibilityService {
   }
 
   private void picker(AccessibilityNodeInfo r,PublicationTask t){
-    if(Build.VERSION.SDK_INT<24){mark(t,"TIKTOK_PAUSED","TIKTOK — Android < 24");return;}
-    if(t.scheduledAt<=System.currentTimeMillis()+60000){mark(t,"TIKTOK_PAUSED","TIKTOK — date dépassée ou trop proche");return;}
+    if(Build.VERSION.SDK_INT<24){failTask(t,"time_selector_failed");return;}
+    if(t.scheduledAt<=System.currentTimeMillis()+60000){failTask(t,"time_selector_failed");return;}
     Rect screen=new Rect();r.getBoundsInScreen(screen);if(screen.width()<=0||screen.height()<=0)return;
     Calendar target=Calendar.getInstance();target.setTimeInMillis(t.scheduledAt);
     Cols c=columns(r,screen,t.id);diagnostic(r,t,c,target,screen);
@@ -111,10 +117,10 @@ public class BotAccessibilityService extends AccessibilityService {
       if(date!=null&&hour!=null&&minute!=null){
         if(!sameDay(date,target)){verifyReset(t.id);wheel(r,c.d,target.after(date)?1:-1,t,"date → "+fmtDate(target));return;}
         int wh=target.get(Calendar.HOUR_OF_DAY);if(hour!=wh){verifyReset(t.id);wheel(r,c.h,dir(hour,wh,24),t,"heure → "+two(wh));return;}
-        int wm=target.get(Calendar.MINUTE);if(minute!=wm){verifyReset(t.id);wheel(r,c.m,dir(minute,wm,60),t,"minutes → "+two(wm));return;}
+        int wm=target.get(Calendar.MINUTE);if(minute!=wm){verifyReset(t.id);wheel(r,c.m,(wm<=30?-1:1),t,"minutes → "+two(wm));return;}
         int n=p().getInt("picker_verified_"+t.id,0)+1;p().edit().putInt("picker_verified_"+t.id,n).apply();
         if(n<2){mark(t,"TIKTOK_PICKER_VERIFY","TIKTOK — double contrôle");return;}
-        if(click(r,"Terminé","Done"))mark(t,"TIKTOK_SCHEDULE_READY","TIKTOK — date et heure validées");return;
+        if(clickDoneCenter(r)){p().edit().putInt("done_attempts_"+t.id,1).apply();mark(t,"TIKTOK_SCHEDULE_READY","done_clicked");h.removeCallbacks(retry);h.postDelayed(retry,500);}else{failTask(t,"done_button_not_found");}return;
       }
     }
     fallback(r,t,target,screen);
@@ -126,8 +132,8 @@ public class BotAccessibilityService extends AccessibilityService {
       Calendar now=Calendar.getInstance(),a=(Calendar)now.clone(),b=(Calendar)target.clone();zero(a);zero(b);
       int days=(int)Math.max(0,(b.getTimeInMillis()-a.getTimeInMillis())/86400000L);
       int hs=dist(now.get(Calendar.HOUR_OF_DAY),target.get(Calendar.HOUR_OF_DAY),24);
-      int ms=dist(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60);
-      q.edit().putBoolean(k+"init",true).putInt(k+"d",days).putInt(k+"h",hs).putInt(k+"hd",dir(now.get(Calendar.HOUR_OF_DAY),target.get(Calendar.HOUR_OF_DAY),24)).putInt(k+"m",ms).putInt(k+"md",dir(now.get(Calendar.MINUTE),target.get(Calendar.MINUTE),60)).apply();
+      int tm=target.get(Calendar.MINUTE),cm=now.get(Calendar.MINUTE); int ms=tm<=30?(cm-tm+60)%60:(tm-cm+60)%60;
+      q.edit().putBoolean(k+"init",true).putInt(k+"d",days).putInt(k+"h",hs).putInt(k+"hd",dir(now.get(Calendar.HOUR_OF_DAY),target.get(Calendar.HOUR_OF_DAY),24)).putInt(k+"m",ms).putInt(k+"md",target.get(Calendar.MINUTE)<=30?-1:1).apply();
     }
     int d=q.getInt(k+"d",0),hh=q.getInt(k+"h",0),m=q.getInt(k+"m",0);
     float y=screen.top+screen.height()*.642f,xD=screen.left+screen.width()*.20f,xH=screen.left+screen.width()*.575f,xM=screen.left+screen.width()*.835f;
@@ -216,16 +222,19 @@ public class BotAccessibilityService extends AccessibilityService {
   private static String text(AccessibilityNodeInfo n){if(n.getText()!=null&&!n.getText().toString().trim().isEmpty())return n.getText().toString().trim();return n.getContentDescription()==null?"":n.getContentDescription().toString().trim();}
   private static String desc(AccessibilityNodeInfo n){StringBuilder b=new StringBuilder();if(n.getViewIdResourceName()!=null)b.append(n.getViewIdResourceName());if(n.getContentDescription()!=null)b.append(' ').append(n.getContentDescription());if(Build.VERSION.SDK_INT>=26&&n.getHintText()!=null)b.append(' ').append(n.getHintText());if(n.getText()!=null)b.append(' ').append(n.getText());return b.toString().toLowerCase(Locale.ROOT);}
   private static boolean set(AccessibilityNodeInfo n,String v){Bundle b=new Bundle();b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,v);return n.isEditable()&&n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,b);}
+  private void failTask(PublicationTask t,String error){t.status="failed: "+error;PublicationTaskRepository.save(this,t);RemoteTaskReporter.failed(this,t,error);p().edit().remove("active_task_id").putString("last_dispatch_error",error).apply();h.removeCallbacks(retry);}
+  private boolean clickDoneCenter(AccessibilityNodeInfo r){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String label:new String[]{"Terminé","Done"}){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(label);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser()||!n.isClickable())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}
+  private boolean tapText(AccessibilityNodeInfo r,String...ls){if(Build.VERSION.SDK_INT<24||r==null)return false;for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns){if(n==null||!n.isVisibleToUser())continue;Rect b=new Rect();n.getBoundsInScreen(b);if(b.isEmpty())continue;Path pth=new Path();pth.moveTo(b.centerX(),b.centerY());pth.lineTo(b.centerX()+1,b.centerY()+1);GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(pth,0,90)).build();if(dispatchGesture(g,null,null)){last=System.currentTimeMillis();return true;}}}finally{recycle(ns);}}return false;}
   private static boolean click(AccessibilityNodeInfo r,String...ls){for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);if(ns==null)continue;try{for(AccessibilityNodeInfo n:ns)if(clickNode(n))return true;}finally{recycle(ns);}}return false;}
   private static boolean clickNode(AccessibilityNodeInfo n){AccessibilityNodeInfo c=AccessibilityNodeInfo.obtain(n);try{while(c!=null){if(c.isClickable()&&c.isEnabled())return c.performAction(AccessibilityNodeInfo.ACTION_CLICK);AccessibilityNodeInfo x=c.getParent();c.recycle();c=x;}return false;}finally{if(c!=null)c.recycle();}}
   private static boolean has(AccessibilityNodeInfo r,String...ls){for(String l:ls){List<AccessibilityNodeInfo>ns=r.findAccessibilityNodeInfosByText(l);boolean f=ns!=null&&!ns.isEmpty();recycle(ns);if(f)return true;}return false;}
   private void mark(PublicationTask t,String s,String status){p().edit().putString("state_"+t.id,s).apply();t.status=status;PublicationTaskRepository.save(this,t);last=System.currentTimeMillis();}
   private String state(String id){return p().getString("state_"+id,"");}
-  private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).apply();h.removeCallbacks(retry);}
+  private void finish(PublicationTask t,String status){t.status=status;PublicationTaskRepository.save(this,t);RemoteTaskReporter.completed(this,t,isTikTok(t)?"scheduled_confirmed":"published_confirmed");p().edit().remove("active_task_id").remove("state_"+t.id).remove("picker_verified_"+t.id).remove("picker_center_y_"+t.id).remove("meta_ok_"+t.id).remove("done_attempts_"+t.id).remove("publish_wait_"+t.id).apply();h.removeCallbacks(retry);PublicationQueueCoordinator.startNextAfterConfirmed(this);}
   private static boolean isTikTok(PublicationTask t){return t.platform!=null&&t.platform.toLowerCase(Locale.ROOT).contains("tiktok");}
   private static void recycle(List<AccessibilityNodeInfo>ns){if(ns!=null)for(AccessibilityNodeInfo n:ns)if(n!=null)n.recycle();}
   private static final class L{final String v;final float x;final int y;float sp=42f;L(String v,float x,int y){this.v=v;this.x=x;this.y=y;}}
   private static final class Cols{final L d,h,m;Cols(L d,L h,L m,float ds,float hs,float ms){this.d=d;this.h=h;this.m=m;if(d!=null)d.sp=ds;if(h!=null)h.sp=hs;if(m!=null)m.sp=ms;}boolean ok(){return d!=null&&h!=null&&m!=null;}}
   @Override public void onInterrupt(){}
-  @Override public void onDestroy(){h.removeCallbacksAndMessages(null);super.onDestroy();}
+  @Override public void onDestroy(){if(remoteBridge!=null){remoteBridge.stop();remoteBridge=null;}h.removeCallbacksAndMessages(null);super.onDestroy();}
 }
