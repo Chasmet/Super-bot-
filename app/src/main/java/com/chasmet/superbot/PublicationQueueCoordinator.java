@@ -159,7 +159,7 @@ public final class PublicationQueueCoordinator {
     private static boolean isTerminal(String status) {
         if (status == null) return false;
         String s = status.toLowerCase();
-        return s.startsWith("completed") || s.startsWith("failed") || s.startsWith("programmé") || s.startsWith("erreur") || s.startsWith("annulé") || s.startsWith("annule");
+        return s.startsWith("completed") || s.startsWith("failed") || s.startsWith("programmé") || s.startsWith("publié") || s.startsWith("erreur") || s.startsWith("annulé") || s.startsWith("annule");
     }
 
     private static int countPending(Context context) { return (hasActive(context) ? 1 : 0) + queuedCount(context); }

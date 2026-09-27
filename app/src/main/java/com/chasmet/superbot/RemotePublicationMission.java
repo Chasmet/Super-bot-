@@ -13,6 +13,14 @@ public final class RemotePublicationMission {
 
     public static Result dispatch(Context context, JSONObject payload) {
         try {
+            String commandId = payload.optString("_commandId", "");
+            if (!commandId.isEmpty()) {
+                for (PublicationTask existing : PublicationTaskRepository.load(context)) {
+                    if (commandId.equals(existing.remoteCommandId)) {
+                        return new Result(true, "publication_already_received:" + existing.id);
+                    }
+                }
+            }
             String platform = normalize(payload.optString("platform", ""));
             if (platform == null) return new Result(false, "invalid_platform");
 
@@ -64,6 +72,8 @@ public final class RemotePublicationMission {
                 File direct = new File(raw);
                 if (direct.exists()) return direct.getAbsolutePath();
             }
+            // Une URI explicite invalide ne doit jamais être remplacée par une autre vidéo.
+            return "";
         }
         File root = new File(context.getExternalFilesDir(null), "Movies/SuperBot");
         File latest = newestMp4(root, null);

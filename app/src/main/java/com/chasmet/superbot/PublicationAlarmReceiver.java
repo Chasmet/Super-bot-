@@ -22,7 +22,7 @@ public class PublicationAlarmReceiver extends BroadcastReceiver {
 
     public static boolean isSuperBotAwake(Context context) {
         return context.getSharedPreferences("superbot_runtime", Context.MODE_PRIVATE)
-                .getBoolean("awake", true);
+                .getBoolean("awake", false);
     }
 
     public static void setSuperBotAwake(Context context, boolean awake) {
